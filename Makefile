@@ -35,9 +35,11 @@ clean:
 
 install: lib
 	cp $(TARGET) /usr/local/lib
+	cp cuishark.h /usr/local/include
 
 uninstall:
 	rm -f /usr/local/lib/libcuishark.a
+	rm -f /usr/local/include/cuishark.h
 
 run:
 	sudo ./a.out -i lo -Y "icmp"
