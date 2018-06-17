@@ -42,6 +42,7 @@ uninstall:
 	rm -f /usr/local/include/cuishark.h
 
 run:
-	sudo ./a.out -i lo -Y "icmp"
+	sudo ./a.out -i lo
+	# sudo ./a.out -i lo -Y "icmp"
 
 

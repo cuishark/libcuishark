@@ -1626,3 +1626,9 @@ node_t* get_node_from_root(node_t* root, int idx)
   slot(root, vec);
   return vec[idx+1];
 }
+
+void cuishark_apply_dfilter(const char* filter_string)
+{
+  fprintf(stderr, "calling %s(\"%s\")\n", __func__, filter_string);
+}
+

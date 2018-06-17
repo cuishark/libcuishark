@@ -32,6 +32,9 @@ void node_isopen_switch(node_t* n);
 node_t* get_node_from_root(node_t* root, int idx);
 const char* get_interface_name();
 
+void cuishark_apply_dfilter(const char* filter_string);
+
+
 #ifdef __cplusplus
 } // extern C
 #endif

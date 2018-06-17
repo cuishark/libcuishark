@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <pthread.h>
 #include <cuishark.h>
 #include <hexdump.h>
@@ -38,8 +39,24 @@ void* back(void* arg)
   return NULL;
 }
 
+bool mainc_dfilter_true = false;
+void sig_handler(int signum)
+{
+  if (signum != SIGUSR2) return;
+
+  mainc_dfilter_true = !mainc_dfilter_true;
+  /* fprintf(stderr, "dfilter=arp is %s\n", mainc_dfilter_true?"true":"false"); */
+  if (mainc_dfilter_true) cuishark_apply_dfilter("arp");
+  else cuishark_apply_dfilter("");
+  fflush(stderr);
+}
+
 int main(int argc, char** argv)
 {
+  if (signal(SIGUSR2, sig_handler) == SIG_ERR) {
+    exit(1);
+  }
+
   pthread_t frontend;
   pthread_t backend;
   pthread_create(&frontend, NULL, front, NULL);
