@@ -36,7 +36,7 @@ extern "C" {
 #include <wsutil/utf8_entities.h>
 #include <ftypes/ftypes-int.h>
 #include <wsutil/glib-compat.h>
-
+#include <wiretap/wtap-int.h>
 
 
 typedef struct csnode {
@@ -753,19 +753,9 @@ cuishark_init(int argc, char *argv[])
   capture_opts_trim_ring_num_files(&global_capture_opts);
 
   cfile.rfcode = rfcode;
-
   if (dfilter != NULL) {
-    tshark_debug("Compiling display filter: '%s'", dfilter);
-    if (!dfilter_compile(dfilter, &dfcode, &err_msg)) {
-      cmdarg_err("%s", err_msg);
-      g_free(err_msg);
-      epan_cleanup();
-      extcap_cleanup();
-      exit_status = INVALID_FILTER;
-      goto clean_exit;
-    }
+    cuishark_apply_dfilter(dfilter);
   }
-  cfile.dfcode = dfcode;
 
   /* If we're printing as text or PostScript, we have
      to create a print stream. */
@@ -806,6 +796,7 @@ cuishark_init(int argc, char *argv[])
       comment = g_strdup_printf("Dump of PDUs from %s", cf_name);
   }
 
+  cfile.provider.frames = new_frame_data_sequence();
   if (cf_name) {
     tshark_debug("tshark: Opening capture file: %s", cf_name);
     /*
@@ -1537,20 +1528,16 @@ process_packet_single_pass(capture_file *cf, epan_dissect_t *edt, gint64 offset,
     /* Run the filter if we have it. */
     if (cf->dfcode)
       passed = dfilter_apply_edt(cf->dfcode, edt);
+    fdata.flags.passed_dfilter = passed;
   }
 
-  if (passed) {
-    frame_data_set_after_dissect(&fdata, &cum_bytes);
+  frame_data_set_after_dissect(&fdata, &cum_bytes);
+  cf->provider.prev_cap = cf->provider.prev_dis = frame_data_sequence_add(cf->provider.frames, &fdata);
 
-    g_assert(edt);
-    print_packet(cf, edt);
-
-    if (ferror(stdout))
-      exit(2);
-
-    prev_dis_frame = fdata;
-    cf->provider.prev_dis = &prev_dis_frame;
-  }
+  print_packet(cf, edt);
+  prev_dis_frame = fdata;
+  cf->provider.prev_dis = &prev_dis_frame;
+  if (passed) cf->displayed_count ++;
 
   prev_cap_frame = fdata;
   cf->provider.prev_cap = &prev_cap_frame;
@@ -1627,8 +1614,119 @@ node_t* get_node_from_root(node_t* root, int idx)
   return vec[idx+1];
 }
 
-void cuishark_apply_dfilter(const char* filter_string)
+void cuishark_apply_dfilter(const char* dfilter)
 {
-  fprintf(stderr, "calling %s(\"%s\")\n", __func__, filter_string);
+  tshark_debug("Compiling display filter: '%s'", dfilter);
+
+  gchar *err_msg;
+  dfilter_t *dfcode = NULL;
+  if (!dfilter_compile(dfilter, &dfcode, &err_msg)) {
+    cmdarg_err("%s", err_msg);
+    g_free(err_msg);
+    epan_cleanup();
+    extcap_cleanup();
+    exit(INVALID_FILTER);
+  }
+  cfile.dfcode = dfcode;
+
+  epan_dissect_t *edt = epan_dissect_new(cfile.epan, TRUE, TRUE);
+  size_t _num_displayed_packets = 0;
+  size_t frames_count = cfile.count;
+  for (size_t framenum = 1; framenum <= frames_count; framenum++) {
+    wtap_cleareof(cfile.provider.wth);
+
+    frame_data* fdata = frame_data_sequence_find(cfile.provider.frames, framenum);
+    if (!fdata) {
+      fprintf(stderr, "OKASHIII\n");
+      exit(1);
+    }
+
+    cfile.provider.ref = fdata;
+    cfile.provider.prev_cap = fdata;
+    cfile.provider.prev_dis = fdata;
+    cfile.provider.wth->random_fh = cfile.provider.wth->fh;
+    if (!cf_read_record(&cfile, fdata)) {
+      fprintf(stderr, "OKASHII");
+      exit(1);
+    }
+    edt->pi.fd = fdata;
+    tvbuff_t* tvb = frame_tvbuff_new(&cfile.provider, fdata, cfile.buf.data);
+    add_new_data_source(&edt->pi, tvb, "");
+    reset_epan_mem(&cfile, edt, TRUE, TRUE);
+
+    frame_data_set_before_dissect(fdata, &cfile.elapsed_time,
+        &cfile.provider.ref, cfile.provider.prev_dis);
+    cfile.provider.prev_cap = fdata;
+    if (dfcode != NULL) {
+      epan_dissect_prime_with_dfilter(edt, dfcode);
+    }
+    wtap_rec* rec = wtap_get_rec(cfile.provider.wth);
+    epan_dissect_run_with_taps(edt, cfile.cd_t, rec,
+       frame_tvbuff_new(&cfile.provider, fdata, cfile.buf.data), fdata, &cfile.cinfo);
+
+    g_assert(edt);
+    bool passed = true;
+    if (cfile.dfcode) {
+      passed = dfilter_apply_edt(cfile.dfcode, edt);
+    }
+    if (passed) _num_displayed_packets ++;
+    fdata->flags.passed_dfilter = passed;
+  }
+  cfile.displayed_count = _num_displayed_packets;
+  epan_dissect_free(edt);
 }
+
+size_t cuishark_num_displayed_packets() { return cfile.displayed_count; }
+size_t cuishark_num_captured_packets() { return cfile.count; }
+
+void cuishark_status_dump()
+{
+  printf("\n");
+  printf("[+] DisplayFilter\n");
+  if (cfile.dfcode) dfilter_dump(cfile.dfcode);
+  else printf("nil\n");
+  printf("\n");
+  printf("[+] NumPackets\n");
+  printf(" displayed packets: %zd\n", cuishark_num_displayed_packets());
+  printf(" captured packets: %zd\n", cuishark_num_captured_packets());
+  printf("\n");
+}
+
+void cuishark_packets_dump()
+{
+  epan_dissect_t edt;
+  epan_dissect_init(&edt, cfile.epan, TRUE, TRUE);
+
+  printf("\n\n");
+  size_t frames_count = cfile.count;
+  for (size_t framenum = 1; framenum <= frames_count; framenum++) {
+    frame_data* fdata = frame_data_sequence_find(cfile.provider.frames, framenum);
+    if (!fdata) {
+      fprintf(stderr, "OKASHIII id=991j4b1\n");
+      exit(1);
+    }
+
+    if (fdata->flags.passed_dfilter) {
+      cfile.provider.ref = fdata;
+      cfile.provider.prev_cap = fdata;
+      cfile.provider.prev_dis = fdata;
+      cfile.provider.wth->random_fh = cfile.provider.wth->fh;
+
+      if (!cf_read_record(&cfile, fdata)) {
+        fprintf(stderr, "OKASHII id=12349\n");
+        exit(1);
+      }
+
+      edt.pi.fd = fdata;
+      tvbuff_t* tvb = frame_tvbuff_new(&cfile.provider, fdata, cfile.buf.data);
+      add_new_data_source(&edt.pi, tvb, "");
+      print_packet(&cfile, &edt);
+    }
+  }
+  cfile.provider.wth->random_fh = NULL;
+  printf("\n\n");
+
+  epan_dissect_cleanup(&edt);
+}
+
 

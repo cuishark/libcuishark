@@ -39,29 +39,50 @@ void* back(void* arg)
   return NULL;
 }
 
-bool mainc_dfilter_true = false;
-void sig_handler(int signum)
+void exec_cmd(int argc, char** argv)
 {
-  if (signum != SIGUSR2) return;
+  if (strcmp(argv[0], "df") == 0) cuishark_apply_dfilter(argv[1]);
+  else if (strcmp(argv[0], "clear") == 0) cuishark_apply_dfilter("");
+  else if (strcmp(argv[0], "dump") == 0) cuishark_status_dump();
+  else if (strcmp(argv[0], "print") == 0) cuishark_packets_dump();
+  else if (strcmp(argv[0], "quit") == 0) exit(0);
+}
 
-  mainc_dfilter_true = !mainc_dfilter_true;
-  /* fprintf(stderr, "dfilter=arp is %s\n", mainc_dfilter_true?"true":"false"); */
-  if (mainc_dfilter_true) cuishark_apply_dfilter("arp");
-  else cuishark_apply_dfilter("");
-  fflush(stderr);
+void* cmdfunc(void* arg)
+{
+  while (cuishark_loop_running()) {
+    printf(">>> ");
+    char str[100];
+    fgets(str, sizeof(str), stdin);
+    str[strlen(str)-1] = 0;
+
+    int argc = 0;
+    char* argv[100];
+    argv[argc] = str;
+    size_t len = strlen(str) + 1;
+    for (size_t i=1; i<len; i++) {
+      if (str[i] == ' ' || str[i] == 0) {
+        str[i] = 0;
+        argc ++;
+        argv[argc] = &str[i+1];
+      }
+    }
+    exec_cmd(argc, argv);
+  }
 }
 
 int main(int argc, char** argv)
 {
-  if (signal(SIGUSR2, sig_handler) == SIG_ERR) {
-    exit(1);
-  }
-
   pthread_t frontend;
   pthread_t backend;
+  pthread_t cmd;
+
   pthread_create(&frontend, NULL, front, NULL);
   pthread_create(&backend , NULL, back, argv);
+  pthread_create(&cmd, NULL, cmdfunc, NULL);
+
   pthread_join(frontend, NULL);
   pthread_join(backend, NULL);
+  pthread_join(cmd, NULL);
 }
 
