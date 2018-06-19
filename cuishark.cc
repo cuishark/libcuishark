@@ -1558,7 +1558,7 @@ write_preamble(capture_file *cf)
 static gboolean
 print_packet(capture_file *cf, epan_dissect_t *edt)
 {
-  epan_dissect_fill_in_columns(edt, FALSE, TRUE);
+  epan_dissect_fill_in_columns(edt, TRUE, TRUE);
   struct packet m;
   m.node.line = get_columns_cstr(cf, edt);
   m.node.childs = get_proto_tree(print_dissections_expanded,
@@ -1629,12 +1629,12 @@ void cuishark_apply_dfilter(const char* dfilter)
   }
   cfile.dfcode = dfcode;
 
-  epan_dissect_t *edt = epan_dissect_new(cfile.epan, TRUE, TRUE);
   size_t _num_displayed_packets = 0;
   size_t frames_count = cfile.count;
   for (size_t framenum = 1; framenum <= frames_count; framenum++) {
     wtap_cleareof(cfile.provider.wth);
 
+    epan_dissect_t *edt = epan_dissect_new(cfile.epan, TRUE, TRUE);
     frame_data* fdata = frame_data_sequence_find(cfile.provider.frames, framenum);
     if (!fdata) {
       fprintf(stderr, "OKASHIII\n");
@@ -1671,9 +1671,9 @@ void cuishark_apply_dfilter(const char* dfilter)
     }
     if (passed) _num_displayed_packets ++;
     fdata->flags.passed_dfilter = passed;
+    epan_dissect_free(edt);
   }
   cfile.displayed_count = _num_displayed_packets;
-  epan_dissect_free(edt);
 }
 
 size_t cuishark_num_displayed_packets() { return cfile.displayed_count; }
@@ -1695,7 +1695,6 @@ void cuishark_status_dump()
 void cuishark_packets_dump()
 {
   epan_dissect_t edt;
-  epan_dissect_init(&edt, cfile.epan, TRUE, TRUE);
 
   printf("\n\n");
   size_t frames_count = cfile.count;
@@ -1705,6 +1704,7 @@ void cuishark_packets_dump()
       fprintf(stderr, "OKASHIII id=991j4b1\n");
       exit(1);
     }
+    epan_dissect_init(&edt, cfile.epan, TRUE, TRUE);
 
     if (fdata->flags.passed_dfilter) {
       cfile.provider.ref = fdata;
@@ -1720,13 +1720,20 @@ void cuishark_packets_dump()
       edt.pi.fd = fdata;
       tvbuff_t* tvb = frame_tvbuff_new(&cfile.provider, fdata, cfile.buf.data);
       add_new_data_source(&edt.pi, tvb, "");
+
+      frame_data_set_before_dissect(fdata, &cfile.elapsed_time,
+          &cfile.provider.ref, cfile.provider.prev_dis);
+      wtap_rec* rec = wtap_get_rec(cfile.provider.wth);
+      epan_dissect_run_with_taps(&edt, cfile.cd_t, rec, tvb, fdata, &cfile.cinfo);
+      frame_data_set_after_dissect(fdata, &cum_bytes);
+
       print_packet(&cfile, &edt);
     }
+    epan_dissect_cleanup(&edt);
   }
   cfile.provider.wth->random_fh = NULL;
   printf("\n\n");
 
-  epan_dissect_cleanup(&edt);
 }
 
 
