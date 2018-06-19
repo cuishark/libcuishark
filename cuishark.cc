@@ -401,7 +401,6 @@ cuishark_init(int argc, char *argv[])
   gchar               *err_msg;
   e_prefs             *prefs_p;
   gchar               *output_only = NULL;
-  gchar               *volatile pdu_export_arg = NULL;
   const char          *volatile exp_pdu_filename = NULL;
 
   tshark_debug("tshark started with %d args", argc);
@@ -761,41 +760,6 @@ cuishark_init(int argc, char *argv[])
      to create a print stream. */
   print_stream = print_stream_text_stdio_new(stdout);
 
-  /* PDU export requested. Take the ownership of the '-w' file, apply tap
-  * filters and start tapping. */
-  if (pdu_export_arg) {
-      const char *exp_pdu_tap_name = pdu_export_arg;
-      const char *exp_pdu_filter = dfilter; /* may be NULL to disable filter */
-      char       *exp_pdu_error;
-      int         exp_fd;
-      char       *comment;
-
-      if (!cf_name) {
-          cmdarg_err("PDUs export requires a capture file (specify with -r).");
-          exit_status = INVALID_OPTION;
-          goto clean_exit;
-      }
-
-      /* Take ownership of the '-w' output file. */
-      exp_pdu_filename = global_capture_opts.save_file;
-      global_capture_opts.save_file = NULL;
-      if (exp_pdu_filename == NULL) {
-          cmdarg_err("PDUs export requires an output file (-w).");
-          exit_status = INVALID_OPTION;
-          goto clean_exit;
-      }
-
-      exp_fd = ws_open(exp_pdu_filename, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0644);
-      if (exp_fd == -1) {
-          cmdarg_err("%s: %s", exp_pdu_filename, file_open_error_message(errno, TRUE));
-          exit_status = INVALID_FILE;
-          goto clean_exit;
-      }
-
-      /* Activate the export PDU tap */
-      comment = g_strdup_printf("Dump of PDUs from %s", cf_name);
-  }
-
   cfile.provider.frames = new_frame_data_sequence();
   if (cf_name) {
     tshark_debug("tshark: Opening capture file: %s", cf_name);
@@ -846,9 +810,6 @@ cuishark_init(int argc, char *argv[])
       exit_status = 2;
     }
 
-    if (pdu_export_arg) {
-        g_free(pdu_export_arg);
-    }
   } else {
     tshark_debug("tshark: no capture file specified");
     /* No capture file specified, so we're supposed to do a live capture
