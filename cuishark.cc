@@ -373,7 +373,7 @@ get_proto_tree(print_dissections_e print_dissections, gboolean print_hex,
 
 
 static gboolean process_cap_file(capture_file *, char *, int, gboolean, int, gint64);
-static gboolean process_packet_single_pass(capture_file *cf,
+static gboolean process_packet(capture_file *cf,
     epan_dissect_t *edt, gint64 offset, wtap_rec *rec,
     const guchar *pd, guint tap_flags);
 static gboolean write_preamble(capture_file *cf);
@@ -968,12 +968,10 @@ capture_input_new_file(capture_session *cap_session, gchar *new_file)
 
   int err;
   cf_status_t ret = cf_open((capture_file *)cap_session->cf,
-      capture_opts->save_file, WTAP_TYPE_AUTO, is_tempfile, &err)
+      capture_opts->save_file, WTAP_TYPE_AUTO, is_tempfile, &err);
   switch(ret) {
     case CF_OK: break;
     case CF_ERROR:
-      /* Don't unlink (delete) the save file - leave it around,
-         for debugging purposes. */
       g_free(capture_opts->save_file);
       capture_opts->save_file = NULL;
       return FALSE;
@@ -1029,22 +1027,21 @@ capture_input_new_packets(capture_session *cap_session, int to_read)
 
   while (to_read-- && cf->provider.wth) {
     wtap_cleareof(cf->provider.wth);
+
     ret = wtap_read(cf->provider.wth, &err, &err_info, &data_offset);
-    reset_epan_mem(cf, edt, create_proto_tree, TRUE);
     if (ret == FALSE) {
-      /* read from file failed, tell the capture child to stop */
       sync_pipe_stop(cap_session);
       wtap_close(cf->provider.wth);
       cf->provider.wth = NULL;
-    } else {
-      ret = process_packet_single_pass(cf, edt, data_offset,
-                                       wtap_get_rec(cf->provider.wth),
-                                       wtap_get_buf_ptr(cf->provider.wth), tap_flags);
+      break;
     }
-    if (ret != FALSE) {
-      /* packet successfully read and gone through the "Read Filter" */
-      packet_count++;
-    }
+
+    reset_epan_mem(cf, edt, create_proto_tree, TRUE);
+    ret = process_packet(cf, edt, data_offset,
+             wtap_get_rec(cf->provider.wth),
+             wtap_get_buf_ptr(cf->provider.wth), tap_flags);
+    if (ret != FALSE) packet_count++;
+
   }
 
   epan_dissect_free(edt);
@@ -1209,14 +1206,18 @@ process_cap_file(capture_file *cf, char *save_file, int out_file_type,
     tshark_debug("tshark: processing packet #%d", framenum);
     reset_epan_mem(cf, edt, create_proto_tree, TRUE);
 
-    if (process_packet_single_pass(cf, edt, data_offset, wtap_get_rec(cf->provider.wth),
-                                   wtap_get_buf_ptr(cf->provider.wth), tap_flags)) {
+    bool ret = process_packet(cf, edt, data_offset,
+                  wtap_get_rec(cf->provider.wth),
+                  wtap_get_buf_ptr(cf->provider.wth), tap_flags);
+    if (ret) {
       /* Either there's no read filtering or this packet passed the
          filter, so, if we're writing to a capture file, write
          this packet out. */
       if (pdh != NULL) {
         tshark_debug("tshark: writing packet #%d to outfile", framenum);
-        if (!wtap_dump(pdh, wtap_get_rec(cf->provider.wth), wtap_get_buf_ptr(cf->provider.wth), &err, &err_info)) {
+        bool ret = wtap_dump(pdh, wtap_get_rec(cf->provider.wth),
+                    wtap_get_buf_ptr(cf->provider.wth), &err, &err_info);
+        if (!ret) {
           /* Error writing to a capture file */
           tshark_debug("tshark: error writing to a capture file (%d)", err);
           cfile_write_failure_message("TShark", cf->filename, save_file,
@@ -1228,17 +1229,16 @@ process_cap_file(capture_file *cf, char *save_file, int out_file_type,
         }
       }
     }
-    /* Stop reading if we have the maximum number of packets;
-     * When the -c option has not been used, max_packet_count
-     * starts at 0, which practically means, never stop reading.
-     * (unless we roll over max_packet_count ?)
-     */
-    if ( (--max_packet_count == 0) || (max_byte_count != 0 && data_offset >= max_byte_count)) {
+
+    bool exit_cond0 = (--max_packet_count == 0);
+    bool exit_cond1 = (max_byte_count != 0 && data_offset >= max_byte_count);
+    if (exit_cond0 || exit_cond1) {
       tshark_debug("tshark: max_packet_count (%d) or max_byte_count (%" G_GINT64_MODIFIER "d/%" G_GINT64_MODIFIER "d) reached",
                     max_packet_count, data_offset, max_byte_count);
       err = 0; /* This is not an error */
       break;
     }
+
   }
 
   if (edt) {
@@ -1306,7 +1306,7 @@ process_cap_file(capture_file *cf, char *save_file, int out_file_type,
 }
 
 static gboolean
-process_packet_single_pass(capture_file *cf, epan_dissect_t *edt, gint64 offset,
+process_packet(capture_file *cf, epan_dissect_t *edt, gint64 offset,
                            wtap_rec *rec, const guchar *pd,
                            guint tap_flags)
 {
