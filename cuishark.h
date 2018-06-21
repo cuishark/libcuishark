@@ -15,6 +15,7 @@ typedef struct packet packet_t;
 
 bool cuishark_loop_running();
 int cuishark_init(int argc, char *argv[]);
+int cuishark_capture();
 void cuishark_fini();
 bool cuishark_msg_queue_empty();
 

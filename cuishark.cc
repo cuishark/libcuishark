@@ -379,20 +379,18 @@ static gboolean process_packet(capture_file *cf,
 static gboolean write_preamble(capture_file *cf);
 static gboolean print_packet(capture_file *cf, epan_dissect_t *edt);
 static GHashTable *output_only_tables = NULL;
+static gchar *volatile cf_name = NULL;
+static volatile int in_file_type = WTAP_TYPE_AUTO;
+static volatile int out_file_type = WTAP_FILE_TYPE_SUBTYPE_PCAPNG;
+static volatile gboolean out_file_name_res = FALSE;
 
 int
 cuishark_init(int argc, char *argv[])
 {
   int                  opt;
   gboolean             arg_error = FALSE;
-  int                  err;
-  volatile gboolean    success;
   volatile int         exit_status = EXIT_SUCCESS;
   gboolean             start_capture = FALSE;
-  volatile int         out_file_type = WTAP_FILE_TYPE_SUBTYPE_PCAPNG;
-  volatile gboolean    out_file_name_res = FALSE;
-  volatile int         in_file_type = WTAP_TYPE_AUTO;
-  gchar               *volatile cf_name = NULL;
   gchar               *dfilter = NULL;
   dfilter_t           *rfcode = NULL;
   dfilter_t           *dfcode = NULL;
@@ -741,6 +739,13 @@ cuishark_init(int argc, char *argv[])
   print_stream = print_stream_text_stdio_new(stdout);
   cfile.provider.frames = new_frame_data_sequence();
 
+clean_exit:
+  return exit_status;
+} /* cuishark_main */
+
+int cuishark_capture()
+{
+  int exit_status = 0;
 
   /*
    * Starting Capture file or network-interface
@@ -750,11 +755,12 @@ cuishark_init(int argc, char *argv[])
   if (cf_name) {
     tshark_debug("tshark: Opening capture file: %s", cf_name);
 
+    int err;
     if (cf_open(&cfile, cf_name, in_file_type, FALSE, &err) != CF_OK) {
+      fprintf(stderr, "cf_open failed \n");
       epan_cleanup();
       extcap_cleanup();
-      exit_status = INVALID_FILE;
-      goto clean_exit;
+      exit(1);
     }
 
     start_requested_stats();
@@ -766,9 +772,11 @@ cuishark_init(int argc, char *argv[])
     /* Process the packets in the file */
     tshark_debug("tshark: invoking process_cap_file() to process the packets");
     TRY {
-      success = process_cap_file(&cfile, global_capture_opts.save_file, out_file_type, out_file_name_res,
+      volatile bool success = process_cap_file(&cfile,
+          global_capture_opts.save_file, out_file_type, out_file_name_res,
           global_capture_opts.has_autostop_packets ? global_capture_opts.autostop_packets : 0,
           global_capture_opts.has_autostop_filesize ? global_capture_opts.autostop_filesize : 0);
+      if (!success) exit_status = 2;
     }
     CATCH(OutOfMemoryError) {
       fprintf(stderr,
@@ -778,17 +786,15 @@ cuishark_init(int argc, char *argv[])
               "\n"
               "More information and workarounds can be found at\n"
               "https://wiki.wireshark.org/KnownBugs/OutOfMemory\n");
-      success = FALSE;
     } ENDTRY;
-
-    if (!success) exit_status = 2;
 
   } else {
 
     if (!write_preamble(&cfile)) {
       /* show_print_file_io_error(errno); */
+      fprintf(stderr, "write_preamble failed\n");
       exit_status = INVALID_FILE;
-      goto clean_exit;
+      exit(1);
     }
 
     tshark_debug("tshark: performing live capture");
@@ -797,6 +803,11 @@ cuishark_init(int argc, char *argv[])
     exit_status = global_capture_session.fork_child_status;
   }
 
+  return exit_status;
+}
+
+void cuishark_fini()
+{
   g_free(cf_name);
   draw_tap_listeners(TRUE);
   epan_free(cfile.epan);
@@ -806,12 +817,6 @@ cuishark_init(int argc, char *argv[])
   output_fields_free(output_fields);
   output_fields = NULL;
 
-clean_exit:
-  return exit_status;
-} /* cuishark_main */
-
-void cuishark_fini()
-{
   if (cfile.provider.frames != NULL) {
     free_frame_data_sequence(cfile.provider.frames);
     cfile.provider.frames = NULL;
