@@ -345,12 +345,11 @@ print_hex_data_buffer(print_stream_t *stream, const guchar *cp,
 
 std::vector<struct csnode>
 get_proto_tree(print_dissections_e print_dissections, gboolean print_hex,
-                 epan_dissect_t *edt, GHashTable *output_only_tables,
-                 print_stream_t *stream)
+                 epan_dissect_t *edt, GHashTable *output_only_tables)
 {
     print_data data;
     data.level              = 0;
-    data.stream             = stream;
+    data.stream             = print_stream_text_stdio_new(stdout);
     data.success            = TRUE;
     data.src_list           = edt->pi.data_src;
     data.encoding           = (packet_char_enc)edt->pi.fd->flags.encoding;
@@ -880,11 +879,6 @@ cuishark_init(int argc, char *argv[])
 
   g_free(cf_name);
 
-  if (cfile.provider.frames != NULL) {
-    free_frame_data_sequence(cfile.provider.frames);
-    cfile.provider.frames = NULL;
-  }
-
   draw_tap_listeners(TRUE);
   epan_free(cfile.epan);
   epan_cleanup();
@@ -903,6 +897,14 @@ clean_exit:
   cf_close(&cfile);
   return exit_status;
 } /* cuishark_main */
+
+void cuishark_fini()
+{
+  if (cfile.provider.frames != NULL) {
+    free_frame_data_sequence(cfile.provider.frames);
+    cfile.provider.frames = NULL;
+  }
+}
 
   bool loop_running = TRUE;
   guint32 packet_count = 0;
@@ -1513,6 +1515,8 @@ process_packet_single_pass(capture_file *cf, epan_dissect_t *edt, gint64 offset,
 static gboolean
 write_preamble(capture_file *cf)
 {
+  static print_stream_t *print_stream = NULL;
+  print_stream = print_stream_text_stdio_new(stdout);
   return print_preamble(print_stream, cf->filename, get_ws_vcs_version_info());
 }
 
@@ -1523,7 +1527,7 @@ print_packet(capture_file *cf, epan_dissect_t *edt)
   struct packet m;
   m.node.line = get_columns_cstr(cf, edt);
   m.node.childs = get_proto_tree(print_dissections_expanded,
-      TRUE, edt, output_only_tables, print_stream);
+      TRUE, edt, output_only_tables);
 
   GSList* src_le = edt->pi.data_src;
   struct data_source *src = (struct data_source *)src_le->data;

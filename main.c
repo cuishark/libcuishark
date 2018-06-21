@@ -36,6 +36,7 @@ void* back(void* arg)
   int argc;
   for (argc=0; argv[argc]; argc++) ;
   cuishark_init(argc, argv);
+  cuishark_fini();
   return NULL;
 }
 
