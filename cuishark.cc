@@ -878,7 +878,6 @@ cuishark_init(int argc, char *argv[])
   }
 
   g_free(cf_name);
-
   draw_tap_listeners(TRUE);
   epan_free(cfile.epan);
   epan_cleanup();
@@ -888,13 +887,6 @@ cuishark_init(int argc, char *argv[])
   output_fields = NULL;
 
 clean_exit:
-  destroy_print_stream(print_stream);
-  capture_opts_cleanup(&global_capture_opts);
-  col_cleanup(&cfile.cinfo);
-  free_filter_lists();
-  wtap_cleanup();
-  free_progdirs();
-  cf_close(&cfile);
   return exit_status;
 } /* cuishark_main */
 
@@ -904,6 +896,13 @@ void cuishark_fini()
     free_frame_data_sequence(cfile.provider.frames);
     cfile.provider.frames = NULL;
   }
+  destroy_print_stream(print_stream);
+  capture_opts_cleanup(&global_capture_opts);
+  col_cleanup(&cfile.cinfo);
+  wtap_cleanup();
+  free_progdirs();
+  free_filter_lists();
+  cf_close(&cfile);
 }
 
   bool loop_running = TRUE;

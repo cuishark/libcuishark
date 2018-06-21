@@ -24,8 +24,10 @@ CXXOBJ = $(CXXSRC:.cc=.o)
 OBJ = $(COBJ) $(CXXOBJ)
 TARGET = libcuishark.a
 
+all: test example
+
 test: lib
-	gcc $(CFLAGS) main.c -L. -lcuishark $(LDFLAGS) -lstdc++
+	make -C test all
 
 lib: $(OBJ)
 	ar rcs $(TARGET) $(OBJ)
@@ -43,6 +45,5 @@ uninstall:
 
 run:
 	sudo ./a.out -i lo
-	# sudo ./a.out -i lo -Y "icmp"
 
 

@@ -9,6 +9,10 @@ LDFLAGS += -lwiretap -lwsutil -lz -lm -lpcap
 test:
 	gcc $(CFLAGS) main.c -L.. -I.. -lcuishark $(LDFLAGS) -lstdc++
 
+all: test
+	./a.out -r short.pcap
+	./a.out -r vlan.pcap
+
 clean:
 	rm -f $(OBJ) a.out *.a
 
