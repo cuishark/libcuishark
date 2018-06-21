@@ -855,8 +855,6 @@ pipe_input_set_handler(gint source, gpointer user_data,
 static gboolean
 capture(void)
 {
-  gboolean          ret;
-  guint             i;
   GString          *str;
   struct sigaction  action, oldaction;
 
@@ -877,7 +875,7 @@ capture(void)
   global_capture_session.state = CAPTURE_PREPARING;
 
   /* Let the user know which interfaces were chosen. */
-  for (i = 0; i < global_capture_opts.ifaces->len; i++) {
+  for (uint32_t i = 0; i < global_capture_opts.ifaces->len; i++) {
     interface_options *interface_opts;
     interface_opts = &g_array_index(global_capture_opts.ifaces, interface_options, i);
     interface_opts->descr = get_interface_descriptive_name(interface_opts->name);
@@ -886,7 +884,7 @@ capture(void)
   fflush(stderr);
   g_string_free(str, TRUE);
 
-  ret = sync_pipe_start(&global_capture_opts, &global_capture_session, &global_info_data, NULL);
+  bool ret = sync_pipe_start(&global_capture_opts, &global_capture_session, &global_info_data, NULL);
   if (!ret) return FALSE;
 
   loop_running = TRUE;
@@ -1026,9 +1024,10 @@ capture_input_new_packets(capture_session *cap_session, int to_read)
   edt = epan_dissect_new(cf->epan, create_proto_tree, TRUE);
 
   while (to_read-- && cf->provider.wth) {
+
     wtap_cleareof(cf->provider.wth);
 
-    ret = wtap_read(cf->provider.wth, &err, &err_info, &data_offset);
+    bool ret = wtap_read(cf->provider.wth, &err, &err_info, &data_offset);
     if (ret == FALSE) {
       sync_pipe_stop(cap_session);
       wtap_close(cf->provider.wth);
@@ -1042,9 +1041,10 @@ capture_input_new_packets(capture_session *cap_session, int to_read)
              wtap_get_buf_ptr(cf->provider.wth), tap_flags);
     if (ret != FALSE) packet_count++;
 
-  }
+  } /*  while (to_read-- && cf->provider.wth) */
 
   epan_dissect_free(edt);
+  edt = NULL;
 }
 
 
@@ -1201,12 +1201,14 @@ process_cap_file(capture_file *cf, char *save_file, int out_file_type,
      ("packet_details" is true). */
   edt = epan_dissect_new(cf->epan, create_proto_tree, TRUE);
 
-  while (wtap_read(cf->provider.wth, &err, &err_info, &data_offset)) {
-    framenum++;
-    tshark_debug("tshark: processing packet #%d", framenum);
-    reset_epan_mem(cf, edt, create_proto_tree, TRUE);
+  while (true) {
 
-    bool ret = process_packet(cf, edt, data_offset,
+    bool ret = wtap_read(cf->provider.wth, &err, &err_info, &data_offset);
+    if (!ret) break;
+
+    framenum++;
+    reset_epan_mem(cf, edt, create_proto_tree, TRUE);
+    ret = process_packet(cf, edt, data_offset,
                   wtap_get_rec(cf->provider.wth),
                   wtap_get_buf_ptr(cf->provider.wth), tap_flags);
     if (ret) {
@@ -1233,71 +1235,18 @@ process_cap_file(capture_file *cf, char *save_file, int out_file_type,
     bool exit_cond0 = (--max_packet_count == 0);
     bool exit_cond1 = (max_byte_count != 0 && data_offset >= max_byte_count);
     if (exit_cond0 || exit_cond1) {
-      tshark_debug("tshark: max_packet_count (%d) or max_byte_count (%" G_GINT64_MODIFIER "d/%" G_GINT64_MODIFIER "d) reached",
-                    max_packet_count, data_offset, max_byte_count);
-      err = 0; /* This is not an error */
+      tshark_debug("tshark: max_packet_count (%d) or max_byte_count "
+                   "(%" G_GINT64_MODIFIER "d/%" G_GINT64_MODIFIER "d) reached",
+                   max_packet_count, data_offset, max_byte_count);
+      err = 0;
       break;
     }
 
-  }
+  } /* while (true) */
 
-  if (edt) {
-    epan_dissect_free(edt);
-    edt = NULL;
-  }
-
+  epan_dissect_free(edt);
+  edt = NULL;
   wtap_rec_cleanup(&rec);
-
-  if (err != 0 || err_pass1 != 0) {
-    tshark_debug("tshark: something failed along the line (%d)", err);
-    /*
-     * Print a message noting that the read failed somewhere along the line.
-     *
-     * If we're printing packet data, and the standard output and error are
-     * going to the same place, flush the standard output, so everything
-     * buffered up is written, and then print a newline to the standard error
-     * before printing the error message, to separate it from the packet
-     * data.  (Alas, that only works on UN*X; st_dev is meaningless, and
-     * the _fstat() documentation at Microsoft doesn't indicate whether
-     * st_ino is even supported.)
-     */
-    ws_statb64 stat_stdout, stat_stderr;
-
-    if (ws_fstat64(1, &stat_stdout) == 0 && ws_fstat64(2, &stat_stderr) == 0) {
-      if (stat_stdout.st_dev == stat_stderr.st_dev &&
-          stat_stdout.st_ino == stat_stderr.st_ino) {
-        fflush(stdout);
-        fprintf(stderr, "\n");
-      }
-    }
-
-    if (err_pass1 != 0) {
-      /* Error on pass 1 of two-pass processing. */
-      cfile_read_failure_message("TShark", cf->filename, err_pass1,
-                                 err_info_pass1);
-    }
-    if (err != 0) {
-      /* Error on pass 2 of two-pass processing or on the only pass of
-         one-pass processing. */
-      cfile_read_failure_message("TShark", cf->filename, err, err_info);
-    }
-    success = FALSE;
-  }
-  if (save_file != NULL) {
-    if (pdh && out_file_name_res) {
-      if (!wtap_dump_set_addrinfo_list(pdh, get_addrinfo_list())) {
-        cmdarg_err("The file format \"%s\" doesn't support name resolution information.",
-                   wtap_file_type_subtype_short_string(out_file_type));
-      }
-    }
-    /* Now close the capture file. */
-    if (!wtap_dump_close(pdh, &err)) {
-      cfile_close_failure_message(save_file, err);
-      success = FALSE;
-    }
-  }
-
-// out:
   wtap_close(cf->provider.wth);
   cf->provider.wth = NULL;
   wtap_block_array_free(shb_hdrs);
@@ -1310,53 +1259,24 @@ process_packet(capture_file *cf, epan_dissect_t *edt, gint64 offset,
                            wtap_rec *rec, const guchar *pd,
                            guint tap_flags)
 {
-  frame_data      fdata;
-  column_info    *cinfo;
-  gboolean        passed;
-
-  /* Count this packet. */
   cf->count++;
+  gboolean passed = TRUE;
 
-  /* If we're not running a display filter and we're not printing any
-     packet information, we don't need to do a dissection. This means
-     that all packets can be marked as 'passed'. */
-  passed = TRUE;
-
+  frame_data      fdata;
   frame_data_init(&fdata, cf->count, rec, offset, cum_bytes);
 
-  /* If we're going to print packet information, or we're going to
-     run a read filter, or we're going to process taps, set up to
-     do a dissection and do so.  (This is the one and only pass
-     over the packets, so, if we'll be printing packet information
-     or running taps, we'll be doing it here.) */
   if (edt) {
     if ( (gbl_resolv_flags.mac_name || gbl_resolv_flags.network_name ||
         gbl_resolv_flags.transport_name))
-      /* Grab any resolved addresses */
       host_name_lookup_process();
 
-    /* If we're running a filter, prime the epan_dissect_t with that
-       filter. */
-    if (cf->dfcode)
-      epan_dissect_prime_with_dfilter(edt, cf->dfcode);
-
-    /* This is the first and only pass, so prime the epan_dissect_t
-       with the hfids postdissectors want on the first pass. */
+    if (cf->dfcode) epan_dissect_prime_with_dfilter(edt, cf->dfcode);
     prime_epan_dissect_with_postdissector_wanted_hfids(edt);
-
     col_custom_prime_edt(edt, &cf->cinfo);
 
-    /* We only need the columns if either
-         1) some tap needs the columns
-       or
-         2) we're printing packet info but we're *not* verbose; in verbose
-            mode, we print the protocol tree, not the protocol summary.
-       or
-         3) there is a column mapped as an individual field */
-    cinfo = &cf->cinfo;
-
+    column_info* cinfo = &cf->cinfo;
     frame_data_set_before_dissect(&fdata, &cf->elapsed_time,
-                                  &cf->provider.ref, cf->provider.prev_dis);
+                  &cf->provider.ref, cf->provider.prev_dis);
     if (cf->provider.ref == &fdata) {
       ref_frame = fdata;
       cf->provider.ref = &ref_frame;
@@ -1365,21 +1285,17 @@ process_packet(capture_file *cf, epan_dissect_t *edt, gint64 offset,
     epan_dissect_run_with_taps(edt, cf->cd_t, rec,
        frame_tvbuff_new(&cf->provider, &fdata, pd), &fdata, cinfo);
 
-    /* Run the filter if we have it. */
     if (cf->dfcode)
       passed = dfilter_apply_edt(cf->dfcode, edt);
     fdata.flags.passed_dfilter = passed;
   }
+  if (passed) cf->displayed_count ++;
 
   frame_data_set_after_dissect(&fdata, &cum_bytes);
   cf->provider.prev_cap = cf->provider.prev_dis = frame_data_sequence_add(cf->provider.frames, &fdata);
 
   print_packet(cf, edt);
   prev_dis_frame = fdata;
-  cf->provider.prev_dis = &prev_dis_frame;
-  if (passed) cf->displayed_count ++;
-
-  prev_cap_frame = fdata;
   cf->provider.prev_cap = &prev_cap_frame;
 
   if (edt) {

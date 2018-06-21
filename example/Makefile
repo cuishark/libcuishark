@@ -12,3 +12,6 @@ LDFLAGS += `pkg-config --libs wireshark`
 main:
 	gcc $(CFLAGS) main.c $(LDFLAGS)
 
+lib:
+	make -C ../
+
