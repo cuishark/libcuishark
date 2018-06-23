@@ -1459,7 +1459,6 @@ void cuishark_packets_dump()
 {
   epan_dissect_t edt;
 
-  printf("\n\n");
   size_t frames_count = cfile.count;
   for (size_t framenum = 1; framenum <= frames_count; framenum++) {
     frame_data* fdata = frame_data_sequence_find(cfile.provider.frames, framenum);
@@ -1495,7 +1494,6 @@ void cuishark_packets_dump()
     epan_dissect_cleanup(&edt);
   }
   cfile.provider.wth->random_fh = NULL;
-  printf("\n\n");
 
 }
 
