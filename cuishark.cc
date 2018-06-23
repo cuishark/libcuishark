@@ -71,7 +71,6 @@ static frame_data ref_frame;
 static frame_data prev_dis_frame;
 static frame_data prev_cap_frame;
 static gboolean line_buffered;
-static print_stream_t *print_stream = NULL;
 static output_fields_t* output_fields  = NULL;
 static pf_flags protocolfilter_flags = PF_NONE;
 static proto_node_children_grouper_func node_children_grouper = proto_node_group_children_by_unique;
@@ -376,7 +375,6 @@ static gboolean process_cap_file(capture_file *, char *, int, gboolean, int, gin
 static gboolean process_packet(capture_file *cf,
     epan_dissect_t *edt, gint64 offset, wtap_rec *rec,
     const guchar *pd, guint tap_flags);
-static gboolean write_preamble(capture_file *cf);
 static gboolean print_packet(capture_file *cf, epan_dissect_t *edt);
 static GHashTable *output_only_tables = NULL;
 static gchar *volatile cf_name = NULL;
@@ -736,7 +734,6 @@ cuishark_init(int argc, char *argv[])
 
   /* If we're printing as text or PostScript, we have
      to create a print stream. */
-  print_stream = print_stream_text_stdio_new(stdout);
   cfile.provider.frames = new_frame_data_sequence();
 
 clean_exit:
@@ -790,13 +787,6 @@ int cuishark_capture()
 
   } else {
 
-    if (!write_preamble(&cfile)) {
-      /* show_print_file_io_error(errno); */
-      fprintf(stderr, "write_preamble failed\n");
-      exit_status = INVALID_FILE;
-      exit(1);
-    }
-
     tshark_debug("tshark: performing live capture");
     start_requested_stats();
     capture();
@@ -821,7 +811,6 @@ void cuishark_fini()
     free_frame_data_sequence(cfile.provider.frames);
     cfile.provider.frames = NULL;
   }
-  destroy_print_stream(print_stream);
   capture_opts_cleanup(&global_capture_opts);
   col_cleanup(&cfile.cinfo);
   wtap_cleanup();
@@ -1151,18 +1140,6 @@ process_cap_file(capture_file *cf, char *save_file, int out_file_type,
     }
 
   } else {
-    /* Set up to print packet information. */
-    if (!write_preamble(cf)) {
-      /* show_print_file_io_error(errno); */
-      success = FALSE;
-
-      // goto out;
-      wtap_close(cf->provider.wth);
-      cf->provider.wth = NULL;
-      wtap_block_array_free(shb_hdrs);
-      wtap_block_array_free(nrb_hdrs);
-      return success;
-    }
     g_free(idb_inf);
     idb_inf = NULL;
     pdh = NULL;
@@ -1252,8 +1229,6 @@ process_cap_file(capture_file *cf, char *save_file, int out_file_type,
   epan_dissect_free(edt);
   edt = NULL;
   wtap_rec_cleanup(&rec);
-  wtap_close(cf->provider.wth);
-  cf->provider.wth = NULL;
   wtap_block_array_free(shb_hdrs);
   wtap_block_array_free(nrb_hdrs);
   return success;
@@ -1299,8 +1274,11 @@ process_packet(capture_file *cf, epan_dissect_t *edt, gint64 offset,
   frame_data_set_after_dissect(&fdata, &cum_bytes);
   cf->provider.prev_cap = cf->provider.prev_dis = frame_data_sequence_add(cf->provider.frames, &fdata);
 
-  print_packet(cf, edt);
-  prev_dis_frame = fdata;
+  if (passed) {
+    print_packet(cf, edt);
+    prev_dis_frame = fdata;
+  }
+
   cf->provider.prev_cap = &prev_cap_frame;
 
   if (edt) {
@@ -1308,14 +1286,6 @@ process_packet(capture_file *cf, epan_dissect_t *edt, gint64 offset,
     frame_data_destroy(&fdata);
   }
   return passed;
-}
-
-static gboolean
-write_preamble(capture_file *cf)
-{
-  static print_stream_t *print_stream = NULL;
-  print_stream = print_stream_text_stdio_new(stdout);
-  return print_preamble(print_stream, cf->filename, get_ws_vcs_version_info());
 }
 
 static gboolean
@@ -1444,15 +1414,15 @@ size_t cuishark_num_captured_packets() { return cfile.count; }
 
 void cuishark_status_dump()
 {
-  printf("\n");
-  printf("[+] DisplayFilter\n");
+  fprintf(stderr, "\n");
+  fprintf(stderr, "[+] DisplayFilter\n");
   if (cfile.dfcode) dfilter_dump(cfile.dfcode);
-  else printf("nil\n");
-  printf("\n");
-  printf("[+] NumPackets\n");
-  printf(" displayed packets: %zd\n", cuishark_num_displayed_packets());
-  printf(" captured packets: %zd\n", cuishark_num_captured_packets());
-  printf("\n");
+  else fprintf(stderr, "nil\n");
+  fprintf(stderr, "\n");
+  fprintf(stderr, "[+] NumPackets\n");
+  fprintf(stderr, " displayed packets: %zd\n", cuishark_num_displayed_packets());
+  fprintf(stderr, " captured packets: %zd\n", cuishark_num_captured_packets());
+  fprintf(stderr, "\n");
 }
 
 void cuishark_packets_dump()

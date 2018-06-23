@@ -16,17 +16,17 @@ void* front(void* __arg__)
       packet_t* m = cuishark_msgqueue_pop();
       node_t* n = cuishark_msg_node(m);
 
-      printf("%s\n", node_line(n));
-      for (size_t i=0; i<node_childs_num(n); i++) {
-        node_t* cn = node_child(n, i);
-        print_csnode(cn, 0);
-      }
-      hexdump(stdout, cuishark_msg_data_ptr(m), cuishark_msg_data_len(m));
-      printf("\n\n");
+      fprintf(stderr, "%s\n", node_line(n));
+      /* for (size_t i=0; i<node_childs_num(n); i++) { */
+      /*   node_t* cn = node_child(n, i); */
+      /*   print_csnode(cn, 0); */
+      /* } */
+      hexdump(stderr, cuishark_msg_data_ptr(m), cuishark_msg_data_len(m));
+      fprintf(stderr, "\n");
 
     }
   }
-  printf("finish\n");
+  fprintf(stderr, "finish front\n");
   return NULL;
 }
 
@@ -37,7 +37,8 @@ void* back(void* arg)
   for (argc=0; argv[argc]; argc++) ;
   cuishark_init(argc, argv);
   cuishark_capture();
-  cuishark_fini();
+  /* cuishark_fini(); */
+  fprintf(stderr, "finish back()\n");
   return NULL;
 }
 
@@ -53,7 +54,7 @@ void exec_cmd(int argc, char** argv)
 void* cmdfunc(void* arg)
 {
   while (cuishark_loop_running()) {
-    printf(">>> ");
+    fprintf(stderr, ">>> ");
     char str[100];
     fgets(str, sizeof(str), stdin);
     str[strlen(str)-1] = 0;
@@ -69,8 +70,10 @@ void* cmdfunc(void* arg)
         argv[argc] = &str[i+1];
       }
     }
+    fprintf(stderr, "exec_cmd[%s]\n", str);
     exec_cmd(argc, argv);
   }
+  fprintf(stderr, "exit cmdline\n");
 }
 
 int main(int argc, char** argv)
