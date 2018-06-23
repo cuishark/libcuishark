@@ -15,3 +15,6 @@ main:
 lib:
 	make -C ../
 
+run:
+	sudo ./a.out -i lo
+

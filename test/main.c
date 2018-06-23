@@ -26,12 +26,6 @@ int main(int argc, char** argv)
 {
   pthread_t backend;
   pthread_create(&backend , NULL, back, argv);
-
-  /* sleep(2); */
-  /* cuishark_apply_dfilter("ssh"); */
-  /* size_t ret = cuishark_num_displayed_packets(); */
-  /* if (ret != 9) fail("arp filter"); */
-
   pthread_join(backend, NULL);
   fprintf(stderr, "joined\n");
 }
