@@ -9,7 +9,7 @@ LDFLAGS += -lz -lm -lpcap
 LDFLAGS += `pkg-config --libs glib-2.0`
 LDFLAGS += `pkg-config --libs wireshark`
 
-main:
+main: lib
 	gcc $(CFLAGS) main.c $(LDFLAGS)
 
 lib:

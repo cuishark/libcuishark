@@ -1283,7 +1283,6 @@ process_packet(capture_file *cf, epan_dissect_t *edt, gint64 offset,
 
   if (edt) {
     epan_dissect_reset(edt);
-    frame_data_destroy(&fdata);
   }
   return passed;
 }
@@ -1436,6 +1435,7 @@ void cuishark_packets_dump()
       fprintf(stderr, "OKASHIII id=991j4b1\n");
       exit(1);
     }
+
     epan_dissect_init(&edt, cfile.epan, TRUE, TRUE);
 
     if (fdata->flags.passed_dfilter) {
@@ -1450,12 +1450,10 @@ void cuishark_packets_dump()
       }
 
       edt.pi.fd = fdata;
-      tvbuff_t* tvb = frame_tvbuff_new(&cfile.provider, fdata, cfile.buf.data);
-      add_new_data_source(&edt.pi, tvb, "");
-
       frame_data_set_before_dissect(fdata, &cfile.elapsed_time,
           &cfile.provider.ref, cfile.provider.prev_dis);
       wtap_rec* rec = wtap_get_rec(cfile.provider.wth);
+      tvbuff_t* tvb = frame_tvbuff_new(&cfile.provider, fdata, cfile.buf.data);
       epan_dissect_run_with_taps(&edt, cfile.cd_t, rec, tvb, fdata, &cfile.cinfo);
       frame_data_set_after_dissect(fdata, &cum_bytes);
 

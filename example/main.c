@@ -21,8 +21,8 @@ void* front(void* __arg__)
       /*   node_t* cn = node_child(n, i); */
       /*   print_csnode(cn, 0); */
       /* } */
-      hexdump(stderr, cuishark_msg_data_ptr(m), cuishark_msg_data_len(m));
-      fprintf(stderr, "\n");
+      /* hexdump(stderr, cuishark_msg_data_ptr(m), cuishark_msg_data_len(m)); */
+      /* fprintf(stderr, "\n"); */
 
     }
   }
@@ -38,7 +38,7 @@ void* back(void* arg)
   cuishark_init(argc, argv);
   cuishark_capture();
   /* cuishark_fini(); */
-  fprintf(stderr, "finish back()\n");
+  /* fprintf(stderr, "finish back()\n"); */
   return NULL;
 }
 
@@ -70,7 +70,7 @@ void* cmdfunc(void* arg)
         argv[argc] = &str[i+1];
       }
     }
-    fprintf(stderr, "exec_cmd[%s]\n", str);
+    /* fprintf(stderr, "exec_cmd[%s]\n", str); */
     exec_cmd(argc, argv);
   }
   fprintf(stderr, "exit cmdline\n");
