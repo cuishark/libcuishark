@@ -30,6 +30,8 @@ $ ./configure  \
 	--enable-tfshark=false    \
 	--enable-fuzzshark=false  \
 	--enable-androiddump=no   \
+	--enable-shared=yes       \
+	--enable-static=yes       \
 	--disable-guides
 $ make && sudo make install
 ```
