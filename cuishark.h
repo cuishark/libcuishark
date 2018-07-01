@@ -15,6 +15,8 @@ typedef struct packet packet_t;
 
 bool cuishark_loop_running();
 int cuishark_init(int argc, char *argv[]);
+int cuishark_capture();
+void cuishark_fini();
 bool cuishark_msg_queue_empty();
 
 packet_t* cuishark_msgqueue_pop();
@@ -31,6 +33,13 @@ bool node_isopen(node_t* n);
 void node_isopen_switch(node_t* n);
 node_t* get_node_from_root(node_t* root, int idx);
 const char* get_interface_name();
+
+void cuishark_apply_dfilter(const char* filter_string);
+size_t cuishark_num_displayed_packets();
+size_t cuishark_num_captured_packets();
+void cuishark_packets_dump();
+void cuishark_status_dump();
+
 
 #ifdef __cplusplus
 } // extern C

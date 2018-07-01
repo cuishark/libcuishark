@@ -36,7 +36,7 @@ extern "C" {
 #include <wsutil/utf8_entities.h>
 #include <ftypes/ftypes-int.h>
 #include <wsutil/glib-compat.h>
-
+#include <wiretap/wtap-int.h>
 
 
 typedef struct csnode {
@@ -71,7 +71,6 @@ static frame_data ref_frame;
 static frame_data prev_dis_frame;
 static frame_data prev_cap_frame;
 static gboolean line_buffered;
-static print_stream_t *print_stream = NULL;
 static output_fields_t* output_fields  = NULL;
 static pf_flags protocolfilter_flags = PF_NONE;
 static proto_node_children_grouper_func node_children_grouper = proto_node_group_children_by_unique;
@@ -345,12 +344,11 @@ print_hex_data_buffer(print_stream_t *stream, const guchar *cp,
 
 std::vector<struct csnode>
 get_proto_tree(print_dissections_e print_dissections, gboolean print_hex,
-                 epan_dissect_t *edt, GHashTable *output_only_tables,
-                 print_stream_t *stream)
+                 epan_dissect_t *edt, GHashTable *output_only_tables)
 {
     print_data data;
     data.level              = 0;
-    data.stream             = stream;
+    data.stream             = print_stream_text_stdio_new(stdout);
     data.success            = TRUE;
     data.src_list           = edt->pi.data_src;
     data.encoding           = (packet_char_enc)edt->pi.fd->flags.encoding;
@@ -374,34 +372,29 @@ get_proto_tree(print_dissections_e print_dissections, gboolean print_hex,
 
 
 static gboolean process_cap_file(capture_file *, char *, int, gboolean, int, gint64);
-static gboolean process_packet_single_pass(capture_file *cf,
+static gboolean process_packet(capture_file *cf,
     epan_dissect_t *edt, gint64 offset, wtap_rec *rec,
     const guchar *pd, guint tap_flags);
-static gboolean write_preamble(capture_file *cf);
 static gboolean print_packet(capture_file *cf, epan_dissect_t *edt);
 static GHashTable *output_only_tables = NULL;
+static gchar *volatile cf_name = NULL;
+static volatile int in_file_type = WTAP_TYPE_AUTO;
+static volatile int out_file_type = WTAP_FILE_TYPE_SUBTYPE_PCAPNG;
+static volatile gboolean out_file_name_res = FALSE;
 
 int
 cuishark_init(int argc, char *argv[])
 {
   int                  opt;
   gboolean             arg_error = FALSE;
-  int                  err;
-  volatile gboolean    success;
   volatile int         exit_status = EXIT_SUCCESS;
-  int                  caps_queries = 0;
   gboolean             start_capture = FALSE;
-  volatile int         out_file_type = WTAP_FILE_TYPE_SUBTYPE_PCAPNG;
-  volatile gboolean    out_file_name_res = FALSE;
-  volatile int         in_file_type = WTAP_TYPE_AUTO;
-  gchar               *volatile cf_name = NULL;
   gchar               *dfilter = NULL;
   dfilter_t           *rfcode = NULL;
   dfilter_t           *dfcode = NULL;
   gchar               *err_msg;
   e_prefs             *prefs_p;
   gchar               *output_only = NULL;
-  gchar               *volatile pdu_export_arg = NULL;
   const char          *volatile exp_pdu_filename = NULL;
 
   tshark_debug("tshark started with %d args", argc);
@@ -533,162 +526,144 @@ cuishark_init(int argc, char *argv[])
     }
   }
 
-  if (caps_queries) {
-    /* We're supposed to list the link-layer/timestamp types for an interface;
-       did the user also specify a capture file to be read? */
-    if (cf_name) {
-      /* Yes - that's bogus. */
-      cmdarg_err("You can't specify %s and a capture file to be read.",
-                 caps_queries & CAPS_QUERY_LINK_TYPES ? "-L" : "--list-time-stamp-types");
+  if (cf_name) {
+    /*
+     * "-r" was specified, so we're reading a capture file.
+     * Capture options don't apply here.
+     */
+
+    /* We don't support capture filters when reading from a capture file
+       (the BPF compiler doesn't support all link-layer types that we
+       support in capture files we read). */
+    if (global_capture_opts.default_options.cfilter) {
+      cmdarg_err("Only read filters, not capture filters, "
+        "can be specified when reading a capture file.");
       exit_status = INVALID_OPTION;
       goto clean_exit;
     }
-    /* No - did they specify a ring buffer option? */
     if (global_capture_opts.multi_files_on) {
-      cmdarg_err("Ring buffer requested, but a capture isn't being done.");
+      cmdarg_err("Multiple capture files requested, but "
+                 "a capture isn't being done.");
+      exit_status = INVALID_OPTION;
+      goto clean_exit;
+    }
+    if (global_capture_opts.has_file_duration) {
+      cmdarg_err("Switching capture files after a time period was specified, but "
+                 "a capture isn't being done.");
+      exit_status = INVALID_OPTION;
+      goto clean_exit;
+    }
+    if (global_capture_opts.has_file_interval) {
+      cmdarg_err("Switching capture files after a time interval was specified, but "
+                 "a capture isn't being done.");
+      exit_status = INVALID_OPTION;
+      goto clean_exit;
+    }
+    if (global_capture_opts.has_ring_num_files) {
+      cmdarg_err("A ring buffer of capture files was specified, but "
+        "a capture isn't being done.");
+      exit_status = INVALID_OPTION;
+      goto clean_exit;
+    }
+    if (global_capture_opts.has_autostop_files) {
+      cmdarg_err("A maximum number of capture files was specified, but "
+        "a capture isn't being done.");
+      exit_status = INVALID_OPTION;
+      goto clean_exit;
+    }
+    if (global_capture_opts.capture_comment) {
+      cmdarg_err("A capture comment was specified, but "
+        "a capture isn't being done.\nThere's no support for adding "
+        "a capture comment to an existing capture file.");
+      exit_status = INVALID_OPTION;
+      goto clean_exit;
+    }
+
+    /* Note: TShark now allows the restriction of a _read_ file by packet count
+     * and byte count as well as a write file. Other autostop options remain valid
+     * only for a write file.
+     */
+    if (global_capture_opts.has_autostop_duration) {
+      cmdarg_err("A maximum capture time was specified, but "
+        "a capture isn't being done.");
       exit_status = INVALID_OPTION;
       goto clean_exit;
     }
   } else {
-    if (cf_name) {
-      /*
-       * "-r" was specified, so we're reading a capture file.
-       * Capture options don't apply here.
-       */
+    /*
+     * "-r" wasn't specified, so we're doing a live capture.
+     */
 
-      /* We don't support capture filters when reading from a capture file
-         (the BPF compiler doesn't support all link-layer types that we
-         support in capture files we read). */
-      if (global_capture_opts.default_options.cfilter) {
-        cmdarg_err("Only read filters, not capture filters, "
-          "can be specified when reading a capture file.");
+    if (global_capture_opts.saving_to_file) {
+      /* They specified a "-w" flag, so we'll be saving to a capture file. */
+
+      /* When capturing, we only support writing pcap or pcapng format. */
+      if (out_file_type != WTAP_FILE_TYPE_SUBTYPE_PCAP &&
+          out_file_type != WTAP_FILE_TYPE_SUBTYPE_PCAPNG) {
+        cmdarg_err("Live captures can only be saved in pcap or pcapng format.");
+        exit_status = INVALID_OPTION;
+        goto clean_exit;
+      }
+      if (global_capture_opts.capture_comment &&
+          out_file_type != WTAP_FILE_TYPE_SUBTYPE_PCAPNG) {
+        cmdarg_err("A capture comment can only be written to a pcapng file.");
+        exit_status = INVALID_OPTION;
+        goto clean_exit;
+      }
+      if (global_capture_opts.multi_files_on) {
+        /* Multiple-file mode doesn't work under certain conditions:
+           a) it doesn't work if you're writing to the standard output;
+           b) it doesn't work if you're writing to a pipe;
+        */
+        if (strcmp(global_capture_opts.save_file, "-") == 0) {
+          cmdarg_err("Multiple capture files requested, but "
+            "the capture is being written to the standard output.");
+          exit_status = INVALID_OPTION;
+          goto clean_exit;
+        }
+        if (global_capture_opts.output_to_pipe) {
+          cmdarg_err("Multiple capture files requested, but "
+            "the capture file is a pipe.");
+          exit_status = INVALID_OPTION;
+          goto clean_exit;
+        }
+        if (!global_capture_opts.has_autostop_filesize &&
+            !global_capture_opts.has_file_duration &&
+            !global_capture_opts.has_file_interval) {
+          cmdarg_err("Multiple capture files requested, but "
+            "no maximum capture file size, duration or interval was specified.");
+          exit_status = INVALID_OPTION;
+          goto clean_exit;
+        }
+      }
+
+      if (dfilter != NULL) {
+        cmdarg_err("Display filters aren't supported when capturing and saving the captured packets.");
+        exit_status = INVALID_OPTION;
+        goto clean_exit;
+      }
+      global_capture_opts.use_pcapng = (out_file_type == WTAP_FILE_TYPE_SUBTYPE_PCAPNG) ? TRUE : FALSE;
+    } else {
+      /* They didn't specify a "-w" flag, so we won't be saving to a
+         capture file.  Check for options that only make sense if
+         we're saving to a file. */
+      if (global_capture_opts.has_autostop_filesize) {
+        cmdarg_err("Maximum capture file size specified, but "
+         "capture isn't being saved to a file.");
         exit_status = INVALID_OPTION;
         goto clean_exit;
       }
       if (global_capture_opts.multi_files_on) {
         cmdarg_err("Multiple capture files requested, but "
-                   "a capture isn't being done.");
-        exit_status = INVALID_OPTION;
-        goto clean_exit;
-      }
-      if (global_capture_opts.has_file_duration) {
-        cmdarg_err("Switching capture files after a time period was specified, but "
-                   "a capture isn't being done.");
-        exit_status = INVALID_OPTION;
-        goto clean_exit;
-      }
-      if (global_capture_opts.has_file_interval) {
-        cmdarg_err("Switching capture files after a time interval was specified, but "
-                   "a capture isn't being done.");
-        exit_status = INVALID_OPTION;
-        goto clean_exit;
-      }
-      if (global_capture_opts.has_ring_num_files) {
-        cmdarg_err("A ring buffer of capture files was specified, but "
-          "a capture isn't being done.");
-        exit_status = INVALID_OPTION;
-        goto clean_exit;
-      }
-      if (global_capture_opts.has_autostop_files) {
-        cmdarg_err("A maximum number of capture files was specified, but "
-          "a capture isn't being done.");
+          "the capture isn't being saved to a file.");
         exit_status = INVALID_OPTION;
         goto clean_exit;
       }
       if (global_capture_opts.capture_comment) {
         cmdarg_err("A capture comment was specified, but "
-          "a capture isn't being done.\nThere's no support for adding "
-          "a capture comment to an existing capture file.");
+          "the capture isn't being saved to a file.");
         exit_status = INVALID_OPTION;
         goto clean_exit;
-      }
-
-      /* Note: TShark now allows the restriction of a _read_ file by packet count
-       * and byte count as well as a write file. Other autostop options remain valid
-       * only for a write file.
-       */
-      if (global_capture_opts.has_autostop_duration) {
-        cmdarg_err("A maximum capture time was specified, but "
-          "a capture isn't being done.");
-        exit_status = INVALID_OPTION;
-        goto clean_exit;
-      }
-    } else {
-      /*
-       * "-r" wasn't specified, so we're doing a live capture.
-       */
-
-      if (global_capture_opts.saving_to_file) {
-        /* They specified a "-w" flag, so we'll be saving to a capture file. */
-
-        /* When capturing, we only support writing pcap or pcapng format. */
-        if (out_file_type != WTAP_FILE_TYPE_SUBTYPE_PCAP &&
-            out_file_type != WTAP_FILE_TYPE_SUBTYPE_PCAPNG) {
-          cmdarg_err("Live captures can only be saved in pcap or pcapng format.");
-          exit_status = INVALID_OPTION;
-          goto clean_exit;
-        }
-        if (global_capture_opts.capture_comment &&
-            out_file_type != WTAP_FILE_TYPE_SUBTYPE_PCAPNG) {
-          cmdarg_err("A capture comment can only be written to a pcapng file.");
-          exit_status = INVALID_OPTION;
-          goto clean_exit;
-        }
-        if (global_capture_opts.multi_files_on) {
-          /* Multiple-file mode doesn't work under certain conditions:
-             a) it doesn't work if you're writing to the standard output;
-             b) it doesn't work if you're writing to a pipe;
-          */
-          if (strcmp(global_capture_opts.save_file, "-") == 0) {
-            cmdarg_err("Multiple capture files requested, but "
-              "the capture is being written to the standard output.");
-            exit_status = INVALID_OPTION;
-            goto clean_exit;
-          }
-          if (global_capture_opts.output_to_pipe) {
-            cmdarg_err("Multiple capture files requested, but "
-              "the capture file is a pipe.");
-            exit_status = INVALID_OPTION;
-            goto clean_exit;
-          }
-          if (!global_capture_opts.has_autostop_filesize &&
-              !global_capture_opts.has_file_duration &&
-              !global_capture_opts.has_file_interval) {
-            cmdarg_err("Multiple capture files requested, but "
-              "no maximum capture file size, duration or interval was specified.");
-            exit_status = INVALID_OPTION;
-            goto clean_exit;
-          }
-        }
-
-        if (dfilter != NULL) {
-          cmdarg_err("Display filters aren't supported when capturing and saving the captured packets.");
-          exit_status = INVALID_OPTION;
-          goto clean_exit;
-        }
-        global_capture_opts.use_pcapng = (out_file_type == WTAP_FILE_TYPE_SUBTYPE_PCAPNG) ? TRUE : FALSE;
-      } else {
-        /* They didn't specify a "-w" flag, so we won't be saving to a
-           capture file.  Check for options that only make sense if
-           we're saving to a file. */
-        if (global_capture_opts.has_autostop_filesize) {
-          cmdarg_err("Maximum capture file size specified, but "
-           "capture isn't being saved to a file.");
-          exit_status = INVALID_OPTION;
-          goto clean_exit;
-        }
-        if (global_capture_opts.multi_files_on) {
-          cmdarg_err("Multiple capture files requested, but "
-            "the capture isn't being saved to a file.");
-          exit_status = INVALID_OPTION;
-          goto clean_exit;
-        }
-        if (global_capture_opts.capture_comment) {
-          cmdarg_err("A capture comment was specified, but "
-            "the capture isn't being saved to a file.");
-          exit_status = INVALID_OPTION;
-          goto clean_exit;
-        }
       }
     }
   }
@@ -753,77 +728,38 @@ cuishark_init(int argc, char *argv[])
   capture_opts_trim_ring_num_files(&global_capture_opts);
 
   cfile.rfcode = rfcode;
-
   if (dfilter != NULL) {
-    tshark_debug("Compiling display filter: '%s'", dfilter);
-    if (!dfilter_compile(dfilter, &dfcode, &err_msg)) {
-      cmdarg_err("%s", err_msg);
-      g_free(err_msg);
-      epan_cleanup();
-      extcap_cleanup();
-      exit_status = INVALID_FILTER;
-      goto clean_exit;
-    }
+    cuishark_apply_dfilter(dfilter);
   }
-  cfile.dfcode = dfcode;
 
   /* If we're printing as text or PostScript, we have
      to create a print stream. */
-  print_stream = print_stream_text_stdio_new(stdout);
+  cfile.provider.frames = new_frame_data_sequence();
 
-  /* PDU export requested. Take the ownership of the '-w' file, apply tap
-  * filters and start tapping. */
-  if (pdu_export_arg) {
-      const char *exp_pdu_tap_name = pdu_export_arg;
-      const char *exp_pdu_filter = dfilter; /* may be NULL to disable filter */
-      char       *exp_pdu_error;
-      int         exp_fd;
-      char       *comment;
+clean_exit:
+  return exit_status;
+} /* cuishark_main */
 
-      if (!cf_name) {
-          cmdarg_err("PDUs export requires a capture file (specify with -r).");
-          exit_status = INVALID_OPTION;
-          goto clean_exit;
-      }
+int cuishark_capture()
+{
+  int exit_status = 0;
 
-      /* Take ownership of the '-w' output file. */
-      exp_pdu_filename = global_capture_opts.save_file;
-      global_capture_opts.save_file = NULL;
-      if (exp_pdu_filename == NULL) {
-          cmdarg_err("PDUs export requires an output file (-w).");
-          exit_status = INVALID_OPTION;
-          goto clean_exit;
-      }
-
-      exp_fd = ws_open(exp_pdu_filename, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0644);
-      if (exp_fd == -1) {
-          cmdarg_err("%s: %s", exp_pdu_filename, file_open_error_message(errno, TRUE));
-          exit_status = INVALID_FILE;
-          goto clean_exit;
-      }
-
-      /* Activate the export PDU tap */
-      comment = g_strdup_printf("Dump of PDUs from %s", cf_name);
-  }
-
+  /*
+   * Starting Capture file or network-interface
+   * check cf_name was set, If it was set, read capturefile
+   * Else, capture the network-interface
+   */
   if (cf_name) {
     tshark_debug("tshark: Opening capture file: %s", cf_name);
-    /*
-     * We're reading a capture file.
-     */
+
+    int err;
     if (cf_open(&cfile, cf_name, in_file_type, FALSE, &err) != CF_OK) {
+      fprintf(stderr, "cf_open failed \n");
       epan_cleanup();
       extcap_cleanup();
-      exit_status = INVALID_FILE;
-      goto clean_exit;
+      exit(1);
     }
 
-    /* Start statistics taps; we do so after successfully opening the
-       capture file, so we know we have something to compute stats
-       on, and after registering all dissectors, so that MATE will
-       have registered its field array so we can have a tap filter
-       with one of MATE's late-registered fields as part of the
-       filter. */
     start_requested_stats();
 
     /* Do we need to do dissection of packets?  That depends on, among
@@ -833,9 +769,11 @@ cuishark_init(int argc, char *argv[])
     /* Process the packets in the file */
     tshark_debug("tshark: invoking process_cap_file() to process the packets");
     TRY {
-      success = process_cap_file(&cfile, global_capture_opts.save_file, out_file_type, out_file_name_res,
+      volatile bool success = process_cap_file(&cfile,
+          global_capture_opts.save_file, out_file_type, out_file_name_res,
           global_capture_opts.has_autostop_packets ? global_capture_opts.autostop_packets : 0,
           global_capture_opts.has_autostop_filesize ? global_capture_opts.autostop_filesize : 0);
+      if (!success) exit_status = 2;
     }
     CATCH(OutOfMemoryError) {
       fprintf(stderr,
@@ -845,80 +783,9 @@ cuishark_init(int argc, char *argv[])
               "\n"
               "More information and workarounds can be found at\n"
               "https://wiki.wireshark.org/KnownBugs/OutOfMemory\n");
-      success = FALSE;
-    }
-    ENDTRY;
+    } ENDTRY;
 
-    if (!success) {
-      /* We still dump out the results of taps, etc., as we might have
-         read some packets; however, we exit with an error status. */
-      exit_status = 2;
-    }
-
-    if (pdu_export_arg) {
-        g_free(pdu_export_arg);
-    }
   } else {
-    tshark_debug("tshark: no capture file specified");
-    /* No capture file specified, so we're supposed to do a live capture
-       or get a list of link-layer types for a live capture device;
-       do we have support for live captures? */
-
-    /* if no interface was specified, pick a default */
-    exit_status = capture_opts_default_iface_if_necessary(&global_capture_opts,
-        ((prefs_p->capture_device) && (*prefs_p->capture_device != '\0'))
-        ? get_if_name(prefs_p->capture_device) : NULL);
-    if (exit_status != 0) {
-      goto clean_exit;
-    }
-
-    /* if requested, list the link layer types and exit */
-    if (caps_queries) {
-        guint i;
-
-        /* Get the list of link-layer types for the capture devices. */
-        for (i = 0; i < global_capture_opts.ifaces->len; i++) {
-          interface_options *interface_opts;
-          if_capabilities_t *caps;
-          char *auth_str = NULL;
-          int if_caps_queries = caps_queries;
-
-          interface_opts = &g_array_index(global_capture_opts.ifaces, interface_options, i);
-
-          gchar *err_str;
-          caps = capture_get_if_capabilities(interface_opts->name,
-              interface_opts->monitor_mode, auth_str, &err_str, NULL);
-          g_free(auth_str);
-          if (caps == NULL) {
-            cmdarg_err("%s", err_str);
-            g_free(err_str);
-            exit_status = INVALID_CAPABILITY;
-            goto clean_exit;
-          }
-          if ((if_caps_queries & CAPS_QUERY_LINK_TYPES) && caps->data_link_types == NULL) {
-            cmdarg_err("The capture device \"%s\" has no data link types.", interface_opts->name);
-            exit_status = INVALID_DATA_LINK;
-            goto clean_exit;
-          }
-          if ((if_caps_queries & CAPS_QUERY_TIMESTAMP_TYPES) && caps->timestamp_types == NULL) {
-            cmdarg_err("The capture device \"%s\" has no timestamp types.", interface_opts->name);
-            exit_status = INVALID_TIMESTAMP_TYPE;
-            goto clean_exit;
-          }
-          if (interface_opts->monitor_mode)
-                if_caps_queries |= CAPS_MONITOR_MODE;
-          capture_opts_print_if_capabilities(caps, interface_opts->name, if_caps_queries);
-          free_if_capabilities(caps);
-        }
-        exit_status = EXIT_SUCCESS;
-        goto clean_exit;
-    }
-
-    if (!write_preamble(&cfile)) {
-      /* show_print_file_io_error(errno); */
-      exit_status = INVALID_FILE;
-      goto clean_exit;
-    }
 
     tshark_debug("tshark: performing live capture");
     start_requested_stats();
@@ -926,13 +793,12 @@ cuishark_init(int argc, char *argv[])
     exit_status = global_capture_session.fork_child_status;
   }
 
+  return exit_status;
+}
+
+void cuishark_fini()
+{
   g_free(cf_name);
-
-  if (cfile.provider.frames != NULL) {
-    free_frame_data_sequence(cfile.provider.frames);
-    cfile.provider.frames = NULL;
-  }
-
   draw_tap_listeners(TRUE);
   epan_free(cfile.epan);
   epan_cleanup();
@@ -941,16 +807,17 @@ cuishark_init(int argc, char *argv[])
   output_fields_free(output_fields);
   output_fields = NULL;
 
-clean_exit:
-  destroy_print_stream(print_stream);
+  if (cfile.provider.frames != NULL) {
+    free_frame_data_sequence(cfile.provider.frames);
+    cfile.provider.frames = NULL;
+  }
   capture_opts_cleanup(&global_capture_opts);
   col_cleanup(&cfile.cinfo);
-  free_filter_lists();
   wtap_cleanup();
   free_progdirs();
+  free_filter_lists();
   cf_close(&cfile);
-  return exit_status;
-} /* cuishark_main */
+}
 
   bool loop_running = TRUE;
   guint32 packet_count = 0;
@@ -982,8 +849,6 @@ pipe_input_set_handler(gint source, gpointer user_data,
 static gboolean
 capture(void)
 {
-  gboolean          ret;
-  guint             i;
   GString          *str;
   struct sigaction  action, oldaction;
 
@@ -1004,25 +869,20 @@ capture(void)
   global_capture_session.state = CAPTURE_PREPARING;
 
   /* Let the user know which interfaces were chosen. */
-  for (i = 0; i < global_capture_opts.ifaces->len; i++) {
+  for (uint32_t i = 0; i < global_capture_opts.ifaces->len; i++) {
     interface_options *interface_opts;
-
     interface_opts = &g_array_index(global_capture_opts.ifaces, interface_options, i);
     interface_opts->descr = get_interface_descriptive_name(interface_opts->name);
   }
   str = get_iface_list_string(&global_capture_opts, IFLIST_QUOTE_IF_DESCRIPTION);
-  // fprintf(stderr, "Capturing on %s\n", str->str);
   fflush(stderr);
   g_string_free(str, TRUE);
 
-  ret = sync_pipe_start(&global_capture_opts, &global_capture_session, &global_info_data, NULL);
-  if (!ret)
-    return FALSE;
+  bool ret = sync_pipe_start(&global_capture_opts, &global_capture_session, &global_info_data, NULL);
+  if (!ret) return FALSE;
 
   loop_running = TRUE;
-
-  TRY
-  {
+  TRY {
     while (loop_running)
     {
         // printf("input callback(%d,%p)\n", pipe_input.source, pipe_input.user_data);
@@ -1032,18 +892,14 @@ capture(void)
           return FALSE;
         }
     }
-  }
-  CATCH(OutOfMemoryError) {
+  } CATCH(OutOfMemoryError) {
     fprintf(stderr,
-            "Out Of Memory.\n"
-            "\n"
-            "Sorry, but TShark has to terminate now.\n"
-            "\n"
-            "More information and workarounds can be found at\n"
-            "https://wiki.wireshark.org/KnownBugs/OutOfMemory\n");
+      "Out Of Memory.\n\n"
+      "Sorry, but TShark has to terminate now.\n\n"
+      "More information and workarounds can be found at\n"
+      "https://wiki.wireshark.org/KnownBugs/OutOfMemory\n");
     exit(1);
-  }
-  ENDTRY;
+  } ENDTRY;
   return TRUE;
 }
 
@@ -1097,60 +953,23 @@ capture_input_new_file(capture_session *cap_session, gchar *new_file)
 {
   capture_options *capture_opts = cap_session->capture_opts;
   capture_file *cf = (capture_file *) cap_session->cf;
-  gboolean is_tempfile;
-  int err;
-
-  if (cap_session->state == CAPTURE_PREPARING) {
-    // g_log(LOG_DOMAIN_CAPTURE, G_LOG_LEVEL_MESSAGE, "Capture started.");
-  }
-  // g_log(LOG_DOMAIN_CAPTURE, G_LOG_LEVEL_MESSAGE, "File: \"%s\"", new_file);
-
   g_assert(cap_session->state == CAPTURE_PREPARING || cap_session->state == CAPTURE_RUNNING);
-
-  /* free the old filename */
-  if (capture_opts->save_file != NULL) {
-
-    /* we start a new capture file, close the old one (if we had one before) */
-    if (cf->state != FILE_CLOSED) {
-      if (cf->provider.wth != NULL) {
-        wtap_close(cf->provider.wth);
-        cf->provider.wth = NULL;
-      }
-      cf->state = FILE_CLOSED;
-    }
-
-    g_free(capture_opts->save_file);
-    is_tempfile = FALSE;
-
-    epan_free(cf->epan);
-    cf->epan = tshark_epan_new(cf);
-  } else {
-    /* we didn't had a save_file before, must be a tempfile */
-    is_tempfile = TRUE;
-  }
-
-  /* save the new filename */
+  gboolean is_tempfile = TRUE;
   capture_opts->save_file = g_strdup(new_file);
-
-  /* if we are in real-time mode, open the new file now */
-  /* this is probably unecessary, but better safe than sorry */
   ((capture_file *)cap_session->cf)->open_type = WTAP_TYPE_AUTO;
-  /* Attempt to open the capture file and set up to read from it. */
-  switch(cf_open((capture_file *)cap_session->cf,
-        capture_opts->save_file, WTAP_TYPE_AUTO,
-        is_tempfile, &err)) {
-  case CF_OK:
-    break;
-  case CF_ERROR:
-    /* Don't unlink (delete) the save file - leave it around,
-       for debugging purposes. */
-    g_free(capture_opts->save_file);
-    capture_opts->save_file = NULL;
-    return FALSE;
+
+  int err;
+  cf_status_t ret = cf_open((capture_file *)cap_session->cf,
+      capture_opts->save_file, WTAP_TYPE_AUTO, is_tempfile, &err);
+  switch(ret) {
+    case CF_OK: break;
+    case CF_ERROR:
+      g_free(capture_opts->save_file);
+      capture_opts->save_file = NULL;
+      return FALSE;
   }
 
   cap_session->state = CAPTURE_RUNNING;
-
   return TRUE;
 }
 
@@ -1199,26 +1018,27 @@ capture_input_new_packets(capture_session *cap_session, int to_read)
   edt = epan_dissect_new(cf->epan, create_proto_tree, TRUE);
 
   while (to_read-- && cf->provider.wth) {
+
     wtap_cleareof(cf->provider.wth);
-    ret = wtap_read(cf->provider.wth, &err, &err_info, &data_offset);
-    reset_epan_mem(cf, edt, create_proto_tree, TRUE);
+
+    bool ret = wtap_read(cf->provider.wth, &err, &err_info, &data_offset);
     if (ret == FALSE) {
-      /* read from file failed, tell the capture child to stop */
       sync_pipe_stop(cap_session);
       wtap_close(cf->provider.wth);
       cf->provider.wth = NULL;
-    } else {
-      ret = process_packet_single_pass(cf, edt, data_offset,
-                                       wtap_get_rec(cf->provider.wth),
-                                       wtap_get_buf_ptr(cf->provider.wth), tap_flags);
+      break;
     }
-    if (ret != FALSE) {
-      /* packet successfully read and gone through the "Read Filter" */
-      packet_count++;
-    }
-  }
+
+    reset_epan_mem(cf, edt, create_proto_tree, TRUE);
+    ret = process_packet(cf, edt, data_offset,
+             wtap_get_rec(cf->provider.wth),
+             wtap_get_buf_ptr(cf->provider.wth), tap_flags);
+    if (ret != FALSE) packet_count++;
+
+  } /*  while (to_read-- && cf->provider.wth) */
 
   epan_dissect_free(edt);
+  edt = NULL;
 }
 
 
@@ -1273,9 +1093,11 @@ process_cap_file(capture_file *cf, char *save_file, int out_file_type,
     nrb_hdrs = wtap_file_get_nrb_for_new_file(cf->provider.wth);
 
     /* If we don't have an application name add Tshark */
-    if (wtap_block_get_string_option_value(g_array_index(shb_hdrs, wtap_block_t, 0), OPT_SHB_USERAPPL, &shb_user_appl) != WTAP_OPTTYPE_SUCCESS) {
+    if (wtap_block_get_string_option_value(g_array_index(shb_hdrs, wtap_block_t, 0),
+          OPT_SHB_USERAPPL, &shb_user_appl) != WTAP_OPTTYPE_SUCCESS) {
         /* this is free'd by wtap_block_free() later */
-        wtap_block_add_string_option_format(g_array_index(shb_hdrs, wtap_block_t, 0), OPT_SHB_USERAPPL, "TShark (Wireshark) %s", get_ws_vcs_version_info());
+        wtap_block_add_string_option_format(g_array_index(shb_hdrs, wtap_block_t, 0),
+            OPT_SHB_USERAPPL, "TShark (Wireshark) %s", get_ws_vcs_version_info());
     }
 
     if (linktype != WTAP_ENCAP_PER_PACKET &&
@@ -1289,8 +1111,7 @@ process_cap_file(capture_file *cf, char *save_file, int out_file_type,
           pdh = wtap_dump_open(save_file, out_file_type, linktype,
               snapshot_length, FALSE /* compressed */, &err);
         }
-    }
-    else {
+    } else {
         tshark_debug("tshark: writing format type %d, to %s", out_file_type, save_file);
         if (strcmp(save_file, "-") == 0) {
           /* Write to the standard output. */
@@ -1317,19 +1138,8 @@ process_cap_file(capture_file *cf, char *save_file, int out_file_type,
       wtap_block_array_free(nrb_hdrs);
       return success;
     }
-  } else {
-    /* Set up to print packet information. */
-    if (!write_preamble(cf)) {
-      /* show_print_file_io_error(errno); */
-      success = FALSE;
 
-      // goto out;
-      wtap_close(cf->provider.wth);
-      cf->provider.wth = NULL;
-      wtap_block_array_free(shb_hdrs);
-      wtap_block_array_free(nrb_hdrs);
-      return success;
-    }
+  } else {
     g_free(idb_inf);
     idb_inf = NULL;
     pdh = NULL;
@@ -1373,19 +1183,25 @@ process_cap_file(capture_file *cf, char *save_file, int out_file_type,
      ("packet_details" is true). */
   edt = epan_dissect_new(cf->epan, create_proto_tree, TRUE);
 
-  while (wtap_read(cf->provider.wth, &err, &err_info, &data_offset)) {
-    framenum++;
-    tshark_debug("tshark: processing packet #%d", framenum);
-    reset_epan_mem(cf, edt, create_proto_tree, TRUE);
+  while (true) {
 
-    if (process_packet_single_pass(cf, edt, data_offset, wtap_get_rec(cf->provider.wth),
-                                   wtap_get_buf_ptr(cf->provider.wth), tap_flags)) {
+    bool ret = wtap_read(cf->provider.wth, &err, &err_info, &data_offset);
+    if (!ret) break;
+
+    framenum++;
+    reset_epan_mem(cf, edt, create_proto_tree, TRUE);
+    ret = process_packet(cf, edt, data_offset,
+                  wtap_get_rec(cf->provider.wth),
+                  wtap_get_buf_ptr(cf->provider.wth), tap_flags);
+    if (ret) {
       /* Either there's no read filtering or this packet passed the
          filter, so, if we're writing to a capture file, write
          this packet out. */
       if (pdh != NULL) {
         tshark_debug("tshark: writing packet #%d to outfile", framenum);
-        if (!wtap_dump(pdh, wtap_get_rec(cf->provider.wth), wtap_get_buf_ptr(cf->provider.wth), &err, &err_info)) {
+        bool ret = wtap_dump(pdh, wtap_get_rec(cf->provider.wth),
+                    wtap_get_buf_ptr(cf->provider.wth), &err, &err_info);
+        if (!ret) {
           /* Error writing to a capture file */
           tshark_debug("tshark: error writing to a capture file (%d)", err);
           cfile_write_failure_message("TShark", cf->filename, save_file,
@@ -1397,135 +1213,50 @@ process_cap_file(capture_file *cf, char *save_file, int out_file_type,
         }
       }
     }
-    /* Stop reading if we have the maximum number of packets;
-     * When the -c option has not been used, max_packet_count
-     * starts at 0, which practically means, never stop reading.
-     * (unless we roll over max_packet_count ?)
-     */
-    if ( (--max_packet_count == 0) || (max_byte_count != 0 && data_offset >= max_byte_count)) {
-      tshark_debug("tshark: max_packet_count (%d) or max_byte_count (%" G_GINT64_MODIFIER "d/%" G_GINT64_MODIFIER "d) reached",
-                    max_packet_count, data_offset, max_byte_count);
-      err = 0; /* This is not an error */
+
+    bool exit_cond0 = (--max_packet_count == 0);
+    bool exit_cond1 = (max_byte_count != 0 && data_offset >= max_byte_count);
+    if (exit_cond0 || exit_cond1) {
+      tshark_debug("tshark: max_packet_count (%d) or max_byte_count "
+                   "(%" G_GINT64_MODIFIER "d/%" G_GINT64_MODIFIER "d) reached",
+                   max_packet_count, data_offset, max_byte_count);
+      err = 0;
       break;
     }
-  }
 
-  if (edt) {
-    epan_dissect_free(edt);
-    edt = NULL;
-  }
+  } /* while (true) */
 
+  epan_dissect_free(edt);
+  edt = NULL;
   wtap_rec_cleanup(&rec);
-
-  if (err != 0 || err_pass1 != 0) {
-    tshark_debug("tshark: something failed along the line (%d)", err);
-    /*
-     * Print a message noting that the read failed somewhere along the line.
-     *
-     * If we're printing packet data, and the standard output and error are
-     * going to the same place, flush the standard output, so everything
-     * buffered up is written, and then print a newline to the standard error
-     * before printing the error message, to separate it from the packet
-     * data.  (Alas, that only works on UN*X; st_dev is meaningless, and
-     * the _fstat() documentation at Microsoft doesn't indicate whether
-     * st_ino is even supported.)
-     */
-    ws_statb64 stat_stdout, stat_stderr;
-
-    if (ws_fstat64(1, &stat_stdout) == 0 && ws_fstat64(2, &stat_stderr) == 0) {
-      if (stat_stdout.st_dev == stat_stderr.st_dev &&
-          stat_stdout.st_ino == stat_stderr.st_ino) {
-        fflush(stdout);
-        fprintf(stderr, "\n");
-      }
-    }
-
-    if (err_pass1 != 0) {
-      /* Error on pass 1 of two-pass processing. */
-      cfile_read_failure_message("TShark", cf->filename, err_pass1,
-                                 err_info_pass1);
-    }
-    if (err != 0) {
-      /* Error on pass 2 of two-pass processing or on the only pass of
-         one-pass processing. */
-      cfile_read_failure_message("TShark", cf->filename, err, err_info);
-    }
-    success = FALSE;
-  }
-  if (save_file != NULL) {
-    if (pdh && out_file_name_res) {
-      if (!wtap_dump_set_addrinfo_list(pdh, get_addrinfo_list())) {
-        cmdarg_err("The file format \"%s\" doesn't support name resolution information.",
-                   wtap_file_type_subtype_short_string(out_file_type));
-      }
-    }
-    /* Now close the capture file. */
-    if (!wtap_dump_close(pdh, &err)) {
-      cfile_close_failure_message(save_file, err);
-      success = FALSE;
-    }
-  }
-
-// out:
-  wtap_close(cf->provider.wth);
-  cf->provider.wth = NULL;
   wtap_block_array_free(shb_hdrs);
   wtap_block_array_free(nrb_hdrs);
   return success;
 }
 
 static gboolean
-process_packet_single_pass(capture_file *cf, epan_dissect_t *edt, gint64 offset,
+process_packet(capture_file *cf, epan_dissect_t *edt, gint64 offset,
                            wtap_rec *rec, const guchar *pd,
                            guint tap_flags)
 {
-  frame_data      fdata;
-  column_info    *cinfo;
-  gboolean        passed;
-
-  /* Count this packet. */
   cf->count++;
+  gboolean passed = TRUE;
 
-  /* If we're not running a display filter and we're not printing any
-     packet information, we don't need to do a dissection. This means
-     that all packets can be marked as 'passed'. */
-  passed = TRUE;
-
+  frame_data      fdata;
   frame_data_init(&fdata, cf->count, rec, offset, cum_bytes);
 
-  /* If we're going to print packet information, or we're going to
-     run a read filter, or we're going to process taps, set up to
-     do a dissection and do so.  (This is the one and only pass
-     over the packets, so, if we'll be printing packet information
-     or running taps, we'll be doing it here.) */
   if (edt) {
     if ( (gbl_resolv_flags.mac_name || gbl_resolv_flags.network_name ||
         gbl_resolv_flags.transport_name))
-      /* Grab any resolved addresses */
       host_name_lookup_process();
 
-    /* If we're running a filter, prime the epan_dissect_t with that
-       filter. */
-    if (cf->dfcode)
-      epan_dissect_prime_with_dfilter(edt, cf->dfcode);
-
-    /* This is the first and only pass, so prime the epan_dissect_t
-       with the hfids postdissectors want on the first pass. */
+    if (cf->dfcode) epan_dissect_prime_with_dfilter(edt, cf->dfcode);
     prime_epan_dissect_with_postdissector_wanted_hfids(edt);
-
     col_custom_prime_edt(edt, &cf->cinfo);
 
-    /* We only need the columns if either
-         1) some tap needs the columns
-       or
-         2) we're printing packet info but we're *not* verbose; in verbose
-            mode, we print the protocol tree, not the protocol summary.
-       or
-         3) there is a column mapped as an individual field */
-    cinfo = &cf->cinfo;
-
+    column_info* cinfo = &cf->cinfo;
     frame_data_set_before_dissect(&fdata, &cf->elapsed_time,
-                                  &cf->provider.ref, cf->provider.prev_dis);
+                  &cf->provider.ref, cf->provider.prev_dis);
     if (cf->provider.ref == &fdata) {
       ref_frame = fdata;
       cf->provider.ref = &ref_frame;
@@ -1534,48 +1265,36 @@ process_packet_single_pass(capture_file *cf, epan_dissect_t *edt, gint64 offset,
     epan_dissect_run_with_taps(edt, cf->cd_t, rec,
        frame_tvbuff_new(&cf->provider, &fdata, pd), &fdata, cinfo);
 
-    /* Run the filter if we have it. */
     if (cf->dfcode)
       passed = dfilter_apply_edt(cf->dfcode, edt);
+    fdata.flags.passed_dfilter = passed;
   }
+  if (passed) cf->displayed_count ++;
+
+  frame_data_set_after_dissect(&fdata, &cum_bytes);
+  cf->provider.prev_cap = cf->provider.prev_dis = frame_data_sequence_add(cf->provider.frames, &fdata);
 
   if (passed) {
-    frame_data_set_after_dissect(&fdata, &cum_bytes);
-
-    g_assert(edt);
     print_packet(cf, edt);
-
-    if (ferror(stdout))
-      exit(2);
-
     prev_dis_frame = fdata;
-    cf->provider.prev_dis = &prev_dis_frame;
   }
 
-  prev_cap_frame = fdata;
   cf->provider.prev_cap = &prev_cap_frame;
 
   if (edt) {
     epan_dissect_reset(edt);
-    frame_data_destroy(&fdata);
   }
   return passed;
 }
 
 static gboolean
-write_preamble(capture_file *cf)
-{
-  return print_preamble(print_stream, cf->filename, get_ws_vcs_version_info());
-}
-
-static gboolean
 print_packet(capture_file *cf, epan_dissect_t *edt)
 {
-  epan_dissect_fill_in_columns(edt, FALSE, TRUE);
+  epan_dissect_fill_in_columns(edt, TRUE, TRUE);
   struct packet m;
   m.node.line = get_columns_cstr(cf, edt);
   m.node.childs = get_proto_tree(print_dissections_expanded,
-      TRUE, edt, output_only_tables, print_stream);
+      TRUE, edt, output_only_tables);
 
   GSList* src_le = edt->pi.data_src;
   struct data_source *src = (struct data_source *)src_le->data;
@@ -1626,3 +1345,124 @@ node_t* get_node_from_root(node_t* root, int idx)
   slot(root, vec);
   return vec[idx+1];
 }
+
+void cuishark_apply_dfilter(const char* dfilter)
+{
+  tshark_debug("Compiling display filter: '%s'", dfilter);
+
+  gchar *err_msg;
+  dfilter_t *dfcode = NULL;
+  if (!dfilter_compile(dfilter, &dfcode, &err_msg)) {
+    cmdarg_err("%s", err_msg);
+    g_free(err_msg);
+    epan_cleanup();
+    extcap_cleanup();
+    exit(INVALID_FILTER);
+  }
+  cfile.dfcode = dfcode;
+
+  size_t _num_displayed_packets = 0;
+  size_t frames_count = cfile.count;
+  for (size_t framenum = 1; framenum <= frames_count; framenum++) {
+    wtap_cleareof(cfile.provider.wth);
+
+    epan_dissect_t *edt = epan_dissect_new(cfile.epan, TRUE, TRUE);
+    frame_data* fdata = frame_data_sequence_find(cfile.provider.frames, framenum);
+    if (!fdata) {
+      fprintf(stderr, "OKASHIII\n");
+      exit(1);
+    }
+
+    cfile.provider.ref = fdata;
+    cfile.provider.prev_cap = fdata;
+    cfile.provider.prev_dis = fdata;
+    cfile.provider.wth->random_fh = cfile.provider.wth->fh;
+    if (!cf_read_record(&cfile, fdata)) {
+      fprintf(stderr, "OKASHII");
+      exit(1);
+    }
+    edt->pi.fd = fdata;
+    tvbuff_t* tvb = frame_tvbuff_new(&cfile.provider, fdata, cfile.buf.data);
+    add_new_data_source(&edt->pi, tvb, "");
+    reset_epan_mem(&cfile, edt, TRUE, TRUE);
+
+    frame_data_set_before_dissect(fdata, &cfile.elapsed_time,
+        &cfile.provider.ref, cfile.provider.prev_dis);
+    cfile.provider.prev_cap = fdata;
+    if (dfcode != NULL) {
+      epan_dissect_prime_with_dfilter(edt, dfcode);
+    }
+    wtap_rec* rec = wtap_get_rec(cfile.provider.wth);
+    epan_dissect_run_with_taps(edt, cfile.cd_t, rec,
+       frame_tvbuff_new(&cfile.provider, fdata, cfile.buf.data), fdata, &cfile.cinfo);
+
+    g_assert(edt);
+    bool passed = true;
+    if (cfile.dfcode) {
+      passed = dfilter_apply_edt(cfile.dfcode, edt);
+    }
+    if (passed) _num_displayed_packets ++;
+    fdata->flags.passed_dfilter = passed;
+    epan_dissect_free(edt);
+  }
+  cfile.displayed_count = _num_displayed_packets;
+}
+
+size_t cuishark_num_displayed_packets() { return cfile.displayed_count; }
+size_t cuishark_num_captured_packets() { return cfile.count; }
+
+void cuishark_status_dump()
+{
+  fprintf(stderr, "\n");
+  fprintf(stderr, "[+] DisplayFilter\n");
+  if (cfile.dfcode) dfilter_dump(cfile.dfcode);
+  else fprintf(stderr, "nil\n");
+  fprintf(stderr, "\n");
+  fprintf(stderr, "[+] NumPackets\n");
+  fprintf(stderr, " displayed packets: %zd\n", cuishark_num_displayed_packets());
+  fprintf(stderr, " captured packets: %zd\n", cuishark_num_captured_packets());
+  fprintf(stderr, "\n");
+}
+
+void cuishark_packets_dump()
+{
+  epan_dissect_t edt;
+
+  size_t frames_count = cfile.count;
+  for (size_t framenum = 1; framenum <= frames_count; framenum++) {
+    frame_data* fdata = frame_data_sequence_find(cfile.provider.frames, framenum);
+    if (!fdata) {
+      fprintf(stderr, "OKASHIII id=991j4b1\n");
+      exit(1);
+    }
+
+    epan_dissect_init(&edt, cfile.epan, TRUE, TRUE);
+
+    if (fdata->flags.passed_dfilter) {
+      cfile.provider.ref = fdata;
+      cfile.provider.prev_cap = fdata;
+      cfile.provider.prev_dis = fdata;
+      cfile.provider.wth->random_fh = cfile.provider.wth->fh;
+
+      if (!cf_read_record(&cfile, fdata)) {
+        fprintf(stderr, "OKASHII id=12349\n");
+        exit(1);
+      }
+
+      edt.pi.fd = fdata;
+      frame_data_set_before_dissect(fdata, &cfile.elapsed_time,
+          &cfile.provider.ref, cfile.provider.prev_dis);
+      wtap_rec* rec = wtap_get_rec(cfile.provider.wth);
+      tvbuff_t* tvb = frame_tvbuff_new(&cfile.provider, fdata, cfile.buf.data);
+      epan_dissect_run_with_taps(&edt, cfile.cd_t, rec, tvb, fdata, &cfile.cinfo);
+      frame_data_set_after_dissect(fdata, &cum_bytes);
+
+      print_packet(&cfile, &edt);
+    }
+    epan_dissect_cleanup(&edt);
+  }
+  cfile.provider.wth->random_fh = NULL;
+
+}
+
+
