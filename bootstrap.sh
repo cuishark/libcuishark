@@ -1,9 +1,11 @@
 #!/bin/sh
 
+CORES=` lscpu | grep "^CPU(s):" | awk '{print $2}' `
+
 sudo apt install \
   autoconf build-essential libtool    \
   libtool libtool-bin libgcrypt-dev   \
-  bison flex libpcap-dev
+  bison flex libpcap-dev libglib2.0-dev
 
 git clone http://github.com/cuishark/wireshark
 cd wireshark
@@ -25,5 +27,5 @@ cd wireshark
 	--enable-shared=yes       \
 	--enable-static=yes       \
 	--disable-guides
-make && sudo make install
+make -j $CORES && sudo make install
 

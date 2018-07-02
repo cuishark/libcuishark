@@ -7,7 +7,7 @@ LDFLAGS += `pkg-config --libs glib-2.0`
 LDFLAGS += -lwiretap -lwsutil -lz -lm -lpcap
 
 test:
-	gcc $(CFLAGS) main.c -L.. -I.. -lcuishark $(LDFLAGS) -lstdc++
+	gcc $(CFLAGS) main.c -L../lib -I../lib -lcuishark $(LDFLAGS) -lstdc++
 
 all: test
 	./a.out -r short.pcap
