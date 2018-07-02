@@ -5,7 +5,7 @@
 #include <signal.h>
 #include <pthread.h>
 #include <cuishark.h>
-#include <hexdump.h>
+#include "hexdump.h"
 
 
 void* front(void* __arg__)

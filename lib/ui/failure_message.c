@@ -123,14 +123,14 @@ cfile_open_failure_message(const char *progname, const char *filename,
             g_free(err_info);
             break;
 
-        case WTAP_ERR_DECOMPRESSION_NOT_SUPPORTED:
-            cmdarg_err("The %s cannot be decompressed; it is compressed in a way that we don't support."
-                       "(%s)",
-                       file_description,
-                       err_info != NULL ? err_info : "no information supplied");
-            g_free(err_info);
-            break;
-
+        /* case WTAP_ERR_DECOMPRESSION_NOT_SUPPORTED: */
+        /*     cmdarg_err("The %s cannot be decompressed; it is compressed in a way that we don't support." */
+        /*                "(%s)", */
+        /*                file_description, */
+        /*                err_info != NULL ? err_info : "no information supplied"); */
+        /*     g_free(err_info); */
+        /*     break; */
+        /*  */
         default:
             cmdarg_err("The %s could not be opened: %s.",
                        file_description,
@@ -261,14 +261,14 @@ cfile_read_failure_message(const char *progname, const char *filename,
         g_free(err_info);
         break;
 
-    case WTAP_ERR_DECOMPRESSION_NOT_SUPPORTED:
-        cmdarg_err("The %s cannot be decompressed; it is compressed in a way that we don't support.\n"
-                   "(%s)",
-                   file_string,
-                   err_info != NULL ? err_info : "no information supplied");
-        g_free(err_info);
-        break;
-
+    /* case WTAP_ERR_DECOMPRESSION_NOT_SUPPORTED: */
+    /*     cmdarg_err("The %s cannot be decompressed; it is compressed in a way that we don't support.\n" */
+    /*                "(%s)", */
+    /*                file_string, */
+    /*                err_info != NULL ? err_info : "no information supplied"); */
+    /*     g_free(err_info); */
+    /*     break; */
+    /*  */
     default:
         cmdarg_err("An error occurred while reading the %s: %s.",
                    file_string, wtap_strerror(err));
