@@ -20,11 +20,10 @@ CXXFLAGS += $(CFLAGS) -std=c++11
 LDFLAGS +=  \
 	-L/usr/local/lib \
 	-pthread \
-	-lglib-2.0  \
-	-lgthread-2.0 \
-	-lwireshark \
-	-lwiretap -lwsutil -lz -lm -lpcap \
-	-lcuishark
+	-lcuishark \
+	-lwiretap -lwsutil -lwireshark \
+	-lgthread-2.0 -lglib-2.0  \
+	-lz -lm -lpcap -lstdc++
 
 main:
 	gcc $(CFLAGS) main.c $(LDFLAGS)
