@@ -1,6 +1,6 @@
 
 CFLAGS += \
-	-I. -g -O0 -pthread \
+	-I. -I../lib -g -O0 -pthread \
 	-I/usr/include \
 	-I/usr/local/include \
 	-I/usr/local/include/wireshark \
@@ -8,6 +8,7 @@ CFLAGS += \
 	-I/usr/include/glib-2.0
 CXXFLAGS += $(CFLAGS) -std=c++11
 LDFLAGS +=  \
+  -L../lib \
 	-L/usr/local/lib \
 	-pthread \
 	-lgthread-2.0 \
