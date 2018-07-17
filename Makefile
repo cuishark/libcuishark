@@ -3,7 +3,7 @@ all: test example
 .PHONY: lib test install uninstall run
 
 test: lib
-	make -C test all
+	make -C test
 
 lib:
 	make -C lib
